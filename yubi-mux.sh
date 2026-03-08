@@ -9,6 +9,8 @@
 # Usage: ./yubi-mux.sh <output_file>
 
 set -euo pipefail
+umask 077       # New files owner-only
+ulimit -c 0     # Disable core dumps
 
 # --- Logging ---
 RED='\033[0;31m'

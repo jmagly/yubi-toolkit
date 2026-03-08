@@ -22,6 +22,58 @@ log_warn()  { printf "${YLW}[WARN]${RST}  %s\n" "$*"; }
 log_err()   { printf "${RED}[ERR]${RST}   %s\n" "$*" >&2; }
 
 # =============================================================================
+# Process hardening
+# =============================================================================
+
+# Call at script entry to prevent secret leaks via core dumps
+harden_process() {
+    umask 077       # New files owner-only (no group/world read)
+    ulimit -c 0     # Disable core dumps (prevents secret material on disk)
+}
+
+# =============================================================================
+# OpenSSL version check
+# =============================================================================
+
+require_openssl3() {
+    if ! command -v openssl &>/dev/null; then
+        log_err "openssl not found"
+        exit 1
+    fi
+    local ver
+    ver=$(openssl version | awk '{print $2}')
+    local major="${ver%%.*}"
+    if [[ "$major" -lt 3 ]]; then
+        log_err "OpenSSL 3.0+ required (found: $ver) — 'openssl kdf' unavailable on 1.x"
+        exit 1
+    fi
+}
+
+# =============================================================================
+# Serial number validation
+# =============================================================================
+
+validate_serial() {
+    local serial="$1"
+    if ! [[ "$serial" =~ ^[0-9]+$ ]]; then
+        log_err "Invalid serial number: $serial (must be numeric)"
+        exit 1
+    fi
+}
+
+# =============================================================================
+# Mode validation
+# =============================================================================
+
+validate_mode() {
+    local mode="$1"
+    if [[ "$mode" != "otp" && "$mode" != "static" && "$mode" != "mixed" ]]; then
+        log_err "Invalid mode: $mode (must be 'otp', 'static', or 'mixed')"
+        exit 1
+    fi
+}
+
+# =============================================================================
 # Secure file deletion
 # =============================================================================
 #
@@ -64,16 +116,18 @@ secure_delete() {
     # Sync to push through caches to controller
     sync "$file" 2>/dev/null
 
+    # Resolve mount point BEFORE deleting (df fails on deleted paths)
+    local mount_point=""
+    if [[ $EUID -eq 0 ]]; then
+        mount_point=$(df --output=target "$file" 2>/dev/null | tail -1)
+    fi
+
     # Remove
     rm -f "$file"
 
-    # If we can fstrim (root), do it on the parent mount
-    if [[ $EUID -eq 0 ]]; then
-        local mount_point
-        mount_point=$(df --output=target "$file" 2>/dev/null | tail -1)
-        if [[ -n "$mount_point" ]]; then
-            fstrim "$mount_point" 2>/dev/null || true
-        fi
+    # If we can fstrim (root), TRIM freed SSD blocks
+    if [[ $EUID -eq 0 && -n "$mount_point" ]]; then
+        fstrim "$mount_point" 2>/dev/null || true
     fi
 
     [[ "$verbose" == "true" ]] && log_ok "Secure deleted: $(basename "$file")"

@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Shared library ---
 source "$SCRIPT_DIR/yubi-lib.sh"
+harden_process
+require_openssl3
 
 # --- Arguments ---
 if [[ $# -lt 2 ]]; then
@@ -39,6 +41,9 @@ fi
 MODE="$1"
 SERIAL="$2"
 LINES_REQUIRED=5
+
+validate_mode "$MODE"
+validate_serial "$SERIAL"
 
 # --- Verify scripts exist ---
 for script in yubi-mux.sh entropy-mix.sh configure-yubi.sh; do

@@ -4,7 +4,7 @@
 # Replaces ALL factory-programmed secrets with user-controlled entropy:
 #   - PIV PIN        (8 numeric digits, derived via HKDF)
 #   - PIV PUK        (8 alphanumeric chars, derived via HKDF)
-#   - PIV Management Key (24 bytes TDES hex, derived via HKDF)
+#   - PIV Management Key (AES256 on 5.4.2+, TDES on older firmware)
 #   - OTP Slot 1     (Yubico OTP or static password)
 #   - OTP Slot 2     (Yubico OTP or static password)
 #
@@ -22,6 +22,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/yubi-lib.sh"
+harden_process
+require_openssl3
 
 # =============================================================================
 # Configuration
@@ -30,10 +32,10 @@ source "$SCRIPT_DIR/yubi-lib.sh"
 MAX_STATIC_LEN=38    # YubiKey static password slot limit
 OTP_AES_KEY_LEN=16   # Yubico OTP AES key: 16 bytes
 OTP_PRIVATE_ID_LEN=6 # Yubico OTP private ID: 6 bytes
-PIV_MGMT_KEY_LEN=24  # PIV management key: 24 bytes (TDES)
 PIV_PIN_LEN=8        # PIV PIN: 8 numeric digits
 PIV_PUK_LEN=8        # PIV PUK: 8 alphanumeric chars
 LINES_REQUIRED=5     # Total entropy lines consumed per key
+# PIV_MGMT_KEY_LEN and MGMT_KEY_ALGO set after firmware detection
 
 # Factory defaults (used to authenticate before changing)
 FACTORY_PIN="123456"
@@ -62,10 +64,8 @@ MODE="$1"
 SERIAL="$2"
 INPUT_FILE="$3"
 
-if [[ "$MODE" != "otp" && "$MODE" != "static" && "$MODE" != "mixed" ]]; then
-    log_err "Invalid mode: $MODE (must be 'otp', 'static', or 'mixed')"
-    exit 1
-fi
+validate_mode "$MODE"
+validate_serial "$SERIAL"
 
 if [[ ! -f "$INPUT_FILE" ]]; then
     log_err "Input data file not found: $INPUT_FILE"
@@ -99,6 +99,33 @@ if ! echo "$connected_serials" | grep -qx "$SERIAL"; then
     exit 1
 fi
 log_ok "YubiKey $SERIAL detected"
+
+# --- Tmpfile cleanup trap ---
+CONFIGURE_TMPFILE=""
+cleanup_configure() {
+    if [[ -n "$CONFIGURE_TMPFILE" && -f "$CONFIGURE_TMPFILE" ]]; then
+        secure_delete "$CONFIGURE_TMPFILE" false
+    fi
+}
+trap cleanup_configure EXIT
+
+# --- Detect firmware version for AES256 management key support ---
+fw_version=$(ykman -d "$SERIAL" info 2>/dev/null | grep 'Firmware version:' | awk '{print $NF}')
+fw_major=$(echo "$fw_version" | cut -d. -f1)
+fw_minor=$(echo "$fw_version" | cut -d. -f2)
+fw_patch=$(echo "$fw_version" | cut -d. -f3)
+
+if [[ "$fw_major" -gt 5 ]] || \
+   [[ "$fw_major" -eq 5 && "$fw_minor" -gt 4 ]] || \
+   [[ "$fw_major" -eq 5 && "$fw_minor" -eq 4 && "$fw_patch" -ge 2 ]]; then
+    MGMT_KEY_ALGO="AES256"
+    PIV_MGMT_KEY_LEN=32   # AES256: 32 bytes
+    log_ok "Firmware $fw_version — using AES256 management key"
+else
+    MGMT_KEY_ALGO="TDES"
+    PIV_MGMT_KEY_LEN=24   # TDES: 24 bytes
+    log_warn "Firmware $fw_version — using TDES management key (AES256 requires 5.4.2+)"
+fi
 
 log_info "Current OTP state:"
 ykman -d "$SERIAL" otp info
@@ -173,16 +200,19 @@ b64_to_ikm_hex() {
 
 # HKDF-SHA256 derive arbitrary bytes
 # Usage: hkdf_derive <b64_input> <info_label> <byte_length>
+# Salt is the YubiKey serial — binds derived credentials to the target device
 hkdf_derive_hex() {
     local ikm_hex
     ikm_hex=$(b64_to_ikm_hex "$1")
     local info_hex
     info_hex=$(printf '%s' "$2" | xxd -p | tr -d '\n')
+    local salt_hex
+    salt_hex=$(printf '%s' "$SERIAL" | xxd -p | tr -d '\n')
 
     openssl kdf -keylen "$3" \
         -kdfopt digest:SHA256 \
         -kdfopt "hexkey:${ikm_hex}" \
-        -kdfopt "hexsalt:" \
+        -kdfopt "hexsalt:${salt_hex}" \
         -kdfopt "hexinfo:${info_hex}" \
         HKDF 2>/dev/null \
         | tr -d ':' | tr '[:upper:]' '[:lower:]'
@@ -230,7 +260,7 @@ derived_pin=$(hex_to_numeric "$pin_hex" "$PIV_PIN_LEN")
 puk_hex=$(hkdf_derive_hex "$raw_puk" "yubikey-piv-puk" "$PIV_PUK_LEN")
 derived_puk=$(hex_to_alphanum "$puk_hex" "$PIV_PUK_LEN")
 
-# --- PIV Management Key (24 bytes TDES, hex) ---
+# --- PIV Management Key (AES256 32 bytes or TDES 24 bytes, hex) ---
 derived_mgmt=$(hkdf_derive_hex "$raw_mgmt" "yubikey-piv-mgmt-key" "$PIV_MGMT_KEY_LEN")
 
 # --- OTP Slot modes ---
@@ -276,7 +306,7 @@ log_info "OTP Slot 1:  ${slot_desc[1]}"
 log_info "OTP Slot 2:  ${slot_desc[2]}"
 log_info "PIV PIN:     ${derived_pin:0:2}******  (8 numeric digits)"
 log_info "PIV PUK:     ${derived_puk:0:2}******  (8 alphanumeric chars)"
-log_info "PIV Mgmt:    ${derived_mgmt:0:8}...${derived_mgmt: -4}  (24-byte TDES)"
+log_info "PIV Mgmt:    ${derived_mgmt:0:8}...${derived_mgmt: -4}  (${PIV_MGMT_KEY_LEN}-byte $MGMT_KEY_ALGO)"
 log_info "Input:       $INPUT_FILE (consuming ${LINES_REQUIRED} lines)"
 echo ""
 if [[ "$slot1_mode" == "otp" || "$slot2_mode" == "otp" ]]; then
@@ -320,18 +350,24 @@ piv_reset_and_retry() {
     echo ""
 }
 
-log_info "Changing management key..."
-if ! ykman -d "$SERIAL" piv access change-management-key \
-    --management-key "$FACTORY_MGMT_KEY" \
-    --new-management-key "$derived_mgmt" \
-    --force 2>/dev/null; then
+# Build management key change args (factory key is always TDES)
+mgmt_change_args=(
+    -d "$SERIAL" piv access change-management-key
+    --management-key "$FACTORY_MGMT_KEY"
+    --new-management-key "$derived_mgmt"
+    --force
+)
+# Set algorithm for the NEW key (factory auth is auto-detected by ykman)
+if [[ "$MGMT_KEY_ALGO" == "AES256" ]]; then
+    mgmt_change_args+=(--algorithm AES256)
+fi
+
+log_info "Changing management key ($MGMT_KEY_ALGO)..."
+if ! ykman "${mgmt_change_args[@]}" 2>/dev/null; then
     piv_reset_and_retry
     # Retry after reset — factory defaults are restored
     log_info "Retrying management key change..."
-    if ! ykman -d "$SERIAL" piv access change-management-key \
-        --management-key "$FACTORY_MGMT_KEY" \
-        --new-management-key "$derived_mgmt" \
-        --force; then
+    if ! ykman "${mgmt_change_args[@]}"; then
         log_err "Management key change FAILED even after reset"
         exit 1
     fi
@@ -409,6 +445,26 @@ fi
 log_ok "Slot 2 programmed ($slot2_mode)"
 
 # =============================================================================
+# Phase 2B: FIDO2 PIN initialization
+# =============================================================================
+
+echo ""
+log_info "=== Phase 2B: FIDO2 PIN ==="
+
+# Reuse PIV PIN for FIDO2 — separate applications, operationally simpler
+log_info "Setting FIDO2 PIN (same as PIV PIN for operational simplicity)..."
+if ykman -d "$SERIAL" fido access change-pin --new-pin "$derived_pin" 2>/dev/null; then
+    log_ok "FIDO2 PIN set"
+elif ykman -d "$SERIAL" fido access change-pin \
+    --pin "$derived_pin" --new-pin "$derived_pin" 2>/dev/null; then
+    # Already has this PIN set — no-op
+    log_ok "FIDO2 PIN already matches"
+else
+    # FIDO2 PIN may already be set to something else, or FIDO2 may be unavailable
+    log_warn "FIDO2 PIN not set — may require manual reset: ykman -d $SERIAL fido reset"
+fi
+
+# =============================================================================
 # Phase 3: Consume entropy lines from input file
 # =============================================================================
 
@@ -416,7 +472,8 @@ echo ""
 log_info "=== Phase 3: Cleanup ==="
 log_info "Removing $LINES_REQUIRED consumed lines from input file..."
 
-tmpfile=$(mktemp "${INPUT_FILE}.tmp.XXXXXX")
+CONFIGURE_TMPFILE=$(mktemp "${INPUT_FILE}.tmp.XXXXXX")
+tmpfile="$CONFIGURE_TMPFILE"
 {
     line_num=0
     while IFS= read -r line; do
@@ -435,6 +492,7 @@ tmpfile=$(mktemp "${INPUT_FILE}.tmp.XXXXXX")
 } > "$tmpfile"
 
 mv "$tmpfile" "$INPUT_FILE"
+CONFIGURE_TMPFILE=""  # Successfully moved — no cleanup needed
 chmod 600 "$INPUT_FILE"
 log_ok "Input file updated — $LINES_REQUIRED lines consumed"
 
@@ -465,13 +523,15 @@ log_ok " YubiKey $SERIAL — fully initialized"
 log_ok "============================================"
 log_ok "OTP Slot 1:  ${slot_desc[1]}"
 log_ok "OTP Slot 2:  ${slot_desc[2]}"
-log_ok "PIV Mgmt:    $derived_mgmt"
+log_ok "PIV Mgmt:    $derived_mgmt  ($MGMT_KEY_ALGO)"
 log_ok "PIV PUK:     $derived_puk"
+log_ok "FIDO2 PIN:   (same as PIV PIN)"
 echo ""
 printf "${GRN}${GRN}[PIN]${RST}  ${GRN}%s${RST}\n" "$derived_pin"
 echo ""
 log_warn "Record the PIN, PUK, and management key securely NOW."
 log_warn "They cannot be recovered — only reset to factory defaults."
+log_warn "Clear terminal scrollback after recording (secrets are visible above)."
 if [[ "$slot1_mode" == "otp" || "$slot2_mode" == "otp" ]]; then
     log_warn "OTP slot(s) will NOT validate against YubiCloud (factory trust removed)."
 fi

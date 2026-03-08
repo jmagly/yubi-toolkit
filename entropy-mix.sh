@@ -8,6 +8,8 @@
 #   output_file: defaults to <input_file>.mixed
 
 set -euo pipefail
+umask 077       # New files owner-only
+ulimit -c 0     # Disable core dumps
 
 # --- Configuration ---
 RETRY_MAX=3
@@ -59,6 +61,14 @@ for cmd in openssl curl sensors; do
         exit 1
     fi
 done
+
+# Verify OpenSSL 3.x for HKDF support
+ossl_ver=$(openssl version | awk '{print $2}')
+ossl_major="${ossl_ver%%.*}"
+if [[ "$ossl_major" -lt 3 ]]; then
+    log_err "OpenSSL 3.0+ required (found: $ossl_ver) — 'openssl kdf' unavailable on 1.x"
+    exit 1
+fi
 
 # --- Entropy collection functions ---
 

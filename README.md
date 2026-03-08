@@ -109,7 +109,8 @@ Each YubiKey initialization consumes **5 seeds** from the pool:
 | OTP Slot 2 | HKDF -> 16-byte AES key + 6-byte private ID |
 | PIV PIN | HKDF -> 8 numeric digits |
 | PIV PUK | HKDF -> 8 alphanumeric chars |
-| PIV Management Key | HKDF -> 24-byte TDES key |
+| PIV Management Key | HKDF -> 32-byte AES256 (firmware 5.4.2+) or 24-byte TDES |
+| FIDO2 PIN | Same as PIV PIN (separate application, operationally simpler) |
 
 ### Entropy Mixing
 
@@ -176,9 +177,14 @@ All file management is automatic — you never need to specify paths.
 ## Security Considerations
 
 - **OTP slots programmed with custom keys will NOT validate against YubiCloud.** This is intentional — you're replacing Yubico's trust chain with your own.
-- **Record your PIN, PUK, and management key immediately** after programming. They cannot be recovered, only reset to factory defaults.
+- **Record your PIN, PUK, and management key immediately** after programming. They cannot be recovered, only reset to factory defaults. Clear terminal scrollback after recording.
 - **PIV auto-reset**: If a key was previously initialized, `configure` will offer to reset PIV to factory defaults before reprogramming.
-- **No secrets are logged or stored** beyond the seed pool files, which are mode 600.
+- **AES256 management key**: Automatically used on firmware 5.4.2+ (NIST deprecated TDES post-2023). Falls back to TDES on older keys.
+- **FIDO2 PIN**: Set automatically during initialization using the same PIN as PIV.
+- **Process hardening**: All scripts set `umask 077` (files never group/world-readable) and `ulimit -c 0` (no core dumps containing secrets).
+- **HKDF salt binding**: Credential derivation uses the YubiKey serial number as HKDF salt, binding derived credentials to the specific target device.
+- **OpenSSL 3.x required**: The `openssl kdf` command used for HKDF is not available in OpenSSL 1.x (Ubuntu 20.04). Scripts check this at startup.
+- **Known limitation**: `ykman` receives credentials as CLI arguments, briefly visible in `/proc/PID/cmdline`. Run on a trusted single-user system.
 
 ## License
 
