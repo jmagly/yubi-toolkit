@@ -1,0 +1,18 @@
+# Seed files — never commit actual entropy
+*.seeds
+*.txt
+!README.md
+
+# Temporary files
+*.tmp.*
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
