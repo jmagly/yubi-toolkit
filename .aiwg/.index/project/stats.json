@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "builtAt": "2026-03-09T20:03:39.530Z",
+  "buildTimeMs": 1,
+  "totalArtifacts": 1,
+  "byPhase": {
+    "other": 1
+  },
+  "byType": {
+    "document": 1
+  },
+  "tagDistribution": {},
+  "graphMetrics": {
+    "totalEdges": 0,
+    "orphanedArtifacts": 1,
+    "mostReferenced": {
+      "path": ".aiwg/frameworks/registry.json",
+      "count": 0
+    }
+  }
+}

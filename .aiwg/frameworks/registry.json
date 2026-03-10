@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "created": "2026-03-09T20:02:53.050Z",
+  "frameworks": [
+    {
+      "id": "forensics-complete",
+      "installed": "2026-03-09T20:02:53.050Z",
+      "version": "1.0.0"
+    },
+    {
+      "id": "media-curator",
+      "installed": "2026-03-09T20:02:53.050Z",
+      "version": "1.0.0"
+    },
+    {
+      "id": "media-marketing-kit",
+      "installed": "2026-03-09T20:02:53.050Z",
+      "version": "1.0.0"
+    },
+    {
+      "id": "research-complete",
+      "installed": "2026-03-09T20:02:53.050Z",
+      "version": "1.0.0"
+    },
+    {
+      "id": "sdlc-complete",
+      "installed": "2026-03-09T20:02:53.050Z",
+      "version": "1.0.0"
+    }
+  ]
+}
