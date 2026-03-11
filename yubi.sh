@@ -133,9 +133,10 @@ BANNER
     echo ""
     printf "${BLD}Modes:${RST}  otp | static | mixed\n"
     echo ""
-    printf "${BLD}Air-gapped flags${RST} (for bootstrap, enrich, init):\n"
+    printf "${BLD}Flags${RST} (for bootstrap, enrich, init):\n"
     printf "  ${DIM}--no-external${RST}         Skip external API calls (local entropy only)\n"
     printf "  ${DIM}--entropy-file PATH${RST}   Use pre-collected entropy instead of live APIs\n"
+    printf "  ${DIM}--image-dir PATH${RST}      Hash image files as additional entropy (bootstrap only)\n"
     echo ""
     printf "${DIM}All seeds stored in: ~/.yubikey-seeds/${RST}\n"
     echo ""
@@ -146,6 +147,7 @@ BANNER
     echo "  yubi.sh bootstrap 15 --mux"
     echo "  yubi.sh bootstrap 15 --no-external"
     echo "  yubi.sh bootstrap 15 --entropy-file ~/entropy-data/pool.bin"
+    echo "  yubi.sh bootstrap 15 --image-dir ~/photos"
     echo "  yubi.sh entropy-collect"
     echo "  yubi.sh entropy-collect --append ~/entropy-data/pool.bin"
     echo "  yubi.sh entropy-verify ~/entropy-data/pool.bin"
@@ -190,6 +192,7 @@ case "$CMD" in
             case "$1" in
                 --no-external)  passthrough_args+=(--no-external); shift ;;
                 --entropy-file) passthrough_args+=(--entropy-file "$2"); shift 2 ;;
+                --image-dir)    passthrough_args+=(--image-dir "$2"); shift 2 ;;
                 --mux)          extra_arg="--mux"; shift ;;
                 *)
                     if [[ "$1" =~ ^[0-9]+$ && "$count" == "15" ]]; then

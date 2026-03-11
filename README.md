@@ -21,6 +21,7 @@ Every seed is mixed from **all available sources** via HKDF-SHA512:
 | NIST Beacon | External | Randomness beacon pulse |
 | drand | External | Distributed randomness beacon |
 | YubiKey passwords | Hardware | Compound passwords from 2 source YubiKeys (mux mode) |
+| Image files | Optional | SHA-256 hashes of user-supplied image files (`--image-dir`) |
 | Extra file | Optional | User-supplied data mixed in per seed |
 
 External APIs use retry+degrade -- if a source fails after 3 attempts, the system continues without it. No single source compromise can weaken the output.
@@ -69,6 +70,7 @@ sudo apt install yubikey-manager openssl curl lm-sensors python3
 | `yubi.sh bootstrap [count]` | Generate seeds from scratch (default: 15) |
 | `yubi.sh bootstrap [count] <file>` | Generate seeds with extra entropy from file |
 | `yubi.sh bootstrap [count] --mux` | Generate seeds with 2-device password muxing |
+| `yubi.sh bootstrap [count] --image-dir <path>` | Generate seeds with image file hashes as entropy |
 | `yubi.sh mux` | Pair passwords from 2 existing YubiKeys |
 | `yubi.sh enrich [file]` | Enrich latest (or specified) seed file with additional entropy |
 
@@ -104,6 +106,7 @@ The `bootstrap`, `enrich`, and `init` commands support these flags for air-gappe
 |------|-------------|
 | `--no-external` | Skip all external API calls; use local entropy only |
 | `--entropy-file <path>` | Use pre-collected entropy file instead of live API calls |
+| `--image-dir <path>` | Hash image files as additional entropy (bootstrap only) |
 
 ### OTP Modes
 

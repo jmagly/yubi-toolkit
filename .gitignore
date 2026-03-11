@@ -16,3 +16,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# AI tooling
+.claude/
+.codex/

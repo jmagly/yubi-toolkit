@@ -66,6 +66,7 @@ Usage: bootstrap-entropy.sh <output_file> [count] [extra_data_file] [options]
 Options:
   --no-external         Skip external API calls (local entropy only)
   --entropy-file PATH   Use pre-collected entropy file instead of live APIs
+  --image-dir PATH      Hash image files as additional entropy (SHA-256, one per file)
 
 Generates high-quality entropy seeds from interactive + system + external
 sources for users who don't yet have configured YubiKeys.
@@ -81,6 +82,7 @@ SEED_COUNT="$DEFAULT_SEEDS"
 EXTRA_FILE=""
 NO_EXTERNAL=false
 ENTROPY_FILE_PATH=""
+IMAGE_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -90,6 +92,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --entropy-file)
             ENTROPY_FILE_PATH="$2"
+            shift 2
+            ;;
+        --image-dir)
+            IMAGE_DIR="$2"
             shift 2
             ;;
         -*)
@@ -130,6 +136,29 @@ if [[ -n "$EXTRA_FILE" ]]; then
         exit 1
     fi
     log_ok "Extra entropy loaded: ${#EXTRA_POOL[@]} lines from $(basename "$EXTRA_FILE")"
+fi
+
+# --- Load image directory entropy ---
+if [[ -n "$IMAGE_DIR" ]]; then
+    if [[ ! -d "$IMAGE_DIR" ]]; then
+        log_err "Image directory not found: $IMAGE_DIR"
+        exit 1
+    fi
+    img_count=0
+    for img in "$IMAGE_DIR"/*.{jpg,jpeg,png,gif,bmp,tiff,tif,webp,svg,ico,heic,heif,avif,raw,cr2,nef,arw} \
+               "$IMAGE_DIR"/*.{JPG,JPEG,PNG,GIF,BMP,TIFF,TIF,WEBP,SVG,ICO,HEIC,HEIF,AVIF,RAW,CR2,NEF,ARW}; do
+        [[ -f "$img" ]] || continue
+        hash=$(openssl dgst -sha256 -hex "$img" 2>/dev/null | awk '{print $NF}')
+        if [[ -n "$hash" ]]; then
+            EXTRA_POOL+=("$hash")
+            img_count=$(( img_count + 1 ))
+        fi
+    done
+    if [[ $img_count -eq 0 ]]; then
+        log_err "No image files found in: $IMAGE_DIR"
+        exit 1
+    fi
+    log_ok "Image entropy loaded: $img_count files hashed (SHA-256) from $(basename "$IMAGE_DIR")"
 fi
 
 # =============================================================================
@@ -187,6 +216,8 @@ if [[ "$NO_EXTERNAL" == "true" ]]; then
     log_info "Sources: keyboard, mouse, CPU RNG, thermal, jitter (no external APIs)"
 elif [[ -n "$ENTROPY_FILE_PATH" ]]; then
     log_info "Sources: keyboard, mouse, CPU RNG, thermal, jitter + entropy file"
+elif [[ ${#EXTRA_POOL[@]} -gt 0 && -n "$IMAGE_DIR" ]]; then
+    log_info "Sources: keyboard, mouse, CPU RNG, thermal, jitter, APIs + images"
 elif [[ ${#EXTRA_POOL[@]} -gt 0 ]]; then
     log_info "Sources: keyboard, mouse, CPU RNG, thermal, jitter, APIs + extra data"
 else
@@ -526,8 +557,11 @@ if [[ $ext_ok -gt 0 ]]; then
 else
     log_warn "  External APIs:      none (local entropy only)"
 fi
-if [[ ${#EXTRA_POOL[@]} -gt 0 ]]; then
-    log_ok "  Extra data:         ${#EXTRA_POOL[@]} lines (random per seed)"
+if [[ -n "$IMAGE_DIR" ]]; then
+    log_ok "  Image hashes:       $img_count files from $(basename "$IMAGE_DIR")"
+fi
+if [[ -n "$EXTRA_FILE" && ${#EXTRA_POOL[@]} -gt 0 ]]; then
+    log_ok "  Extra data:         file lines (random per seed)"
 fi
 echo ""
 log_info "Next steps:"
