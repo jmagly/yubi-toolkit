@@ -31,6 +31,9 @@ set -euo pipefail
 umask 077       # New files owner-only
 ulimit -c 0     # Disable core dumps
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/yubi-lib.sh"
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -39,8 +42,6 @@ HKDF_KEYLEN=32       # 32 bytes = 44 char base64 per seed
 MIN_SEEDS=10
 MAX_SEEDS=20
 DEFAULT_SEEDS=15
-RETRY_MAX=3
-RETRY_DELAY=2
 
 # Keyboard collection: characters needed per round
 KEYS_PER_ROUND=50
@@ -48,22 +49,6 @@ KEYS_PER_ROUND=50
 MOUSE_SAMPLES=80
 MOUSE_INTERVAL_MS=50  # milliseconds between samples
 
-# =============================================================================
-# Logging
-# =============================================================================
-
-RED='\033[0;31m'
-YLW='\033[0;33m'
-GRN='\033[0;32m'
-CYN='\033[0;36m'
-BLD='\033[1m'
-DIM='\033[2m'
-RST='\033[0m'
-
-log_info()  { printf "${CYN}[INFO]${RST}  %s\n" "$*"; }
-log_ok()    { printf "${GRN}[OK]${RST}    %s\n" "$*"; }
-log_warn()  { printf "${YLW}[WARN]${RST}  %s\n" "$*"; }
-log_err()   { printf "${RED}[ERR]${RST}   %s\n" "$*" >&2; }
 log_step()  { printf "\n${BLD}${CYN}>>> %s${RST}\n\n" "$*"; }
 
 # =============================================================================
@@ -72,13 +57,15 @@ log_step()  { printf "\n${BLD}${CYN}>>> %s${RST}\n\n" "$*"; }
 
 if [[ $# -lt 1 ]]; then
     cat <<'USAGE'
-Usage: bootstrap-entropy.sh <output_file> [count] [extra_data_file]
+Usage: bootstrap-entropy.sh <output_file> [count] [extra_data_file] [options]
 
   output_file:      where to write seeds (one base64 per line)
   count:            number of seeds (default: 15, range: 10-20)
   extra_data_file:  optional file with extra entropy (one value per line)
-                    e.g. passwords, random strings, data from another system
-                    Lines are randomly selected and mixed into each seed.
+
+Options:
+  --no-external         Skip external API calls (local entropy only)
+  --entropy-file PATH   Use pre-collected entropy file instead of live APIs
 
 Generates high-quality entropy seeds from interactive + system + external
 sources for users who don't yet have configured YubiKeys.
@@ -88,9 +75,39 @@ USAGE
     exit 1
 fi
 
-OUTPUT_FILE="$1"
-SEED_COUNT="${2:-$DEFAULT_SEEDS}"
-EXTRA_FILE="${3:-}"
+# Parse positional and flag arguments
+OUTPUT_FILE=""
+SEED_COUNT="$DEFAULT_SEEDS"
+EXTRA_FILE=""
+NO_EXTERNAL=false
+ENTROPY_FILE_PATH=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-external)
+            NO_EXTERNAL=true
+            shift
+            ;;
+        --entropy-file)
+            ENTROPY_FILE_PATH="$2"
+            shift 2
+            ;;
+        -*)
+            log_err "Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            if [[ -z "$OUTPUT_FILE" ]]; then
+                OUTPUT_FILE="$1"
+            elif [[ "$SEED_COUNT" == "$DEFAULT_SEEDS" && "$1" =~ ^[0-9]+$ ]]; then
+                SEED_COUNT="$1"
+            elif [[ -z "$EXTRA_FILE" ]]; then
+                EXTRA_FILE="$1"
+            fi
+            shift
+            ;;
+    esac
+done
 
 if [[ "$SEED_COUNT" -lt "$MIN_SEEDS" || "$SEED_COUNT" -gt "$MAX_SEEDS" ]]; then
     log_err "Seed count must be between $MIN_SEEDS and $MAX_SEEDS (got: $SEED_COUNT)"
@@ -166,7 +183,11 @@ BANNER
 printf "${RST}"
 echo ""
 log_info "Generating $SEED_COUNT seeds to: $OUTPUT_FILE"
-if [[ ${#EXTRA_POOL[@]} -gt 0 ]]; then
+if [[ "$NO_EXTERNAL" == "true" ]]; then
+    log_info "Sources: keyboard, mouse, CPU RNG, thermal, jitter (no external APIs)"
+elif [[ -n "$ENTROPY_FILE_PATH" ]]; then
+    log_info "Sources: keyboard, mouse, CPU RNG, thermal, jitter + entropy file"
+elif [[ ${#EXTRA_POOL[@]} -gt 0 ]]; then
     log_info "Sources: keyboard, mouse, CPU RNG, thermal, jitter, APIs + extra data"
 else
     log_info "Sources: keyboard timing, mouse movement, CPU RNG, thermal, jitter, APIs"
@@ -377,51 +398,13 @@ log_ok "Jitter entropy collected"
 
 log_step "Phase 3: External Entropy Sources"
 
-call_external() {
-    local name="$1"; shift
-    local attempt=0
-    local response=""
-    while (( attempt < RETRY_MAX )); do
-        attempt=$(( attempt + 1 ))
-        response=$(curl -sf --max-time 10 "$@" 2>/dev/null) && break
-        log_warn "$name: attempt $attempt/$RETRY_MAX failed"
-        sleep "$RETRY_DELAY"
-        response=""
-    done
-    if [[ -z "$response" ]]; then
-        log_warn "$name: ALL RETRIES FAILED — degrading"
-        echo ""; return 1
-    fi
-    echo "$response"; return 0
-}
+# Use shared dispatcher — handles --no-external, --entropy-file, or live fetch
+ext_args=()
+[[ "$NO_EXTERNAL" == "true" ]] && ext_args+=(--no-external)
+[[ -n "$ENTROPY_FILE_PATH" ]] && ext_args+=(--entropy-file "$ENTROPY_FILE_PATH")
 
-EXT_RANDOM_ORG=""
-EXT_NIST=""
-EXT_DRAND=""
-ext_ok=0
-
-log_info "Fetching random.org..."
-if EXT_RANDOM_ORG=$(call_external "random.org" \
-    "https://www.random.org/integers/?num=10&min=0&max=1000000000&col=1&base=10&format=plain&rnd=new"); then
-    log_ok "random.org"
-    ext_ok=$(( ext_ok + 1 ))
-fi
-
-log_info "Fetching NIST Beacon..."
-if EXT_NIST=$(call_external "NIST Beacon" \
-    "https://beacon.nist.gov/beacon/2.0/pulse/last"); then
-    log_ok "NIST Beacon"
-    ext_ok=$(( ext_ok + 1 ))
-fi
-
-log_info "Fetching drand..."
-if EXT_DRAND=$(call_external "drand" \
-    "https://drand.cloudflare.com/public/latest"); then
-    log_ok "drand"
-    ext_ok=$(( ext_ok + 1 ))
-fi
-
-log_info "External sources: $ext_ok/3"
+get_external_entropy "${ext_args[@]+"${ext_args[@]}"}"
+ext_ok="$EXT_SOURCES_OK"
 
 # =============================================================================
 # Phase 4: Generate seeds via HKDF-SHA512 mixing

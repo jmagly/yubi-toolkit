@@ -2,11 +2,13 @@
 # yubi.sh — Unified entry point for YubiKey entropy and provisioning toolkit
 #
 # Subcommands:
-#   bootstrap   [count] [file|--mux] Generate seeds from scratch (no keys needed)
+#   bootstrap        [count] [file|--mux] [--no-external|--entropy-file PATH]
 #   mux                              Pair passwords from 2 existing YubiKeys
-#   enrich                           Enrich latest seed file with external entropy
+#   enrich           [file] [--no-external|--entropy-file PATH]
+#   entropy-collect  [file] [--append] [--sources LIST] [--quiet]
+#   entropy-verify   <file>          Validate a collected entropy file
 #   configure   <mode> [serial]      Program a YubiKey from seed pool
-#   init        <mode> [serial]      Full pipeline: 2 keys → mux → enrich → program
+#   init        <mode> [serial] [--no-external|--entropy-file PATH]
 #   list                             Show connected YubiKeys
 #   info        [serial]             Detailed info for a specific key
 #   status                           Show seed pool status
@@ -111,21 +113,29 @@ BANNER
     printf "${RST}"
     echo ""
     printf "${BLD}Seed Generation:${RST}\n"
-    printf "  ${GRN}bootstrap${RST}  [count] [extra|--mux]      Generate seeds from scratch (default: 15)\n"
-    printf "  ${GRN}mux${RST}                                 Pair passwords from 2 existing YubiKeys\n"
-    printf "  ${GRN}enrich${RST}                              Enrich latest seed file with external entropy\n"
+    printf "  ${GRN}bootstrap${RST}        [count] [extra|--mux]  Generate seeds from scratch (default: 15)\n"
+    printf "  ${GRN}mux${RST}                                    Pair passwords from 2 existing YubiKeys\n"
+    printf "  ${GRN}enrich${RST}           [file]                Enrich latest seed file with external entropy\n"
+    echo ""
+    printf "${BLD}Entropy Collection (air-gapped workflows):${RST}\n"
+    printf "  ${GRN}entropy-collect${RST}  [file] [--append]     Collect external entropy to portable file\n"
+    printf "  ${GRN}entropy-verify${RST}   <file>                Validate a collected entropy file\n"
     echo ""
     printf "${BLD}Key Programming:${RST}\n"
-    printf "  ${GRN}configure${RST}  <mode> [serial]          Program a YubiKey from seed pool\n"
-    printf "  ${GRN}init${RST}       <mode> [serial]           Full pipeline: 2 keys → mux → enrich → program\n"
+    printf "  ${GRN}configure${RST}        <mode> [serial]       Program a YubiKey from seed pool\n"
+    printf "  ${GRN}init${RST}             <mode> [serial]       Full pipeline: 2 keys → mux → enrich → program\n"
     echo ""
     printf "${BLD}Info:${RST}\n"
-    printf "  ${GRN}list${RST}                                 Show connected YubiKeys\n"
-    printf "  ${GRN}info${RST}       [serial]                  Detailed info (auto-detects single key)\n"
-    printf "  ${GRN}status${RST}                               Show seed pool status\n"
-    printf "  ${GRN}purge${RST}                                Securely wipe empty/exhausted seed files\n"
+    printf "  ${GRN}list${RST}                                   Show connected YubiKeys\n"
+    printf "  ${GRN}info${RST}             [serial]              Detailed info (auto-detects single key)\n"
+    printf "  ${GRN}status${RST}                                 Show seed pool status\n"
+    printf "  ${GRN}purge${RST}                                  Securely wipe empty/exhausted seed files\n"
     echo ""
     printf "${BLD}Modes:${RST}  otp | static | mixed\n"
+    echo ""
+    printf "${BLD}Air-gapped flags${RST} (for bootstrap, enrich, init):\n"
+    printf "  ${DIM}--no-external${RST}         Skip external API calls (local entropy only)\n"
+    printf "  ${DIM}--entropy-file PATH${RST}   Use pre-collected entropy instead of live APIs\n"
     echo ""
     printf "${DIM}All seeds stored in: ~/.yubikey-seeds/${RST}\n"
     echo ""
@@ -134,9 +144,15 @@ BANNER
     echo "  yubi.sh bootstrap 20"
     echo "  yubi.sh bootstrap 15 ~/extra-passwords.txt"
     echo "  yubi.sh bootstrap 15 --mux"
+    echo "  yubi.sh bootstrap 15 --no-external"
+    echo "  yubi.sh bootstrap 15 --entropy-file ~/entropy-data/pool.bin"
+    echo "  yubi.sh entropy-collect"
+    echo "  yubi.sh entropy-collect --append ~/entropy-data/pool.bin"
+    echo "  yubi.sh entropy-verify ~/entropy-data/pool.bin"
     echo "  yubi.sh configure otp"
     echo "  yubi.sh configure mixed 35276256"
     echo "  yubi.sh init otp"
+    echo "  yubi.sh init otp --entropy-file ~/entropy-data/pool.bin"
     echo "  yubi.sh status"
     echo "  yubi.sh list"
     exit 1
@@ -166,26 +182,43 @@ case "$CMD" in
 
     bootstrap)
         ensure_seed_dir
-        count="${1:-15}"
-        extra_arg="${2:-}"
+        # Parse bootstrap-specific args, separating passthrough flags
+        count="15"
+        extra_arg=""
+        passthrough_args=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --no-external)  passthrough_args+=(--no-external); shift ;;
+                --entropy-file) passthrough_args+=(--entropy-file "$2"); shift 2 ;;
+                --mux)          extra_arg="--mux"; shift ;;
+                *)
+                    if [[ "$1" =~ ^[0-9]+$ && "$count" == "15" ]]; then
+                        count="$1"
+                    elif [[ -z "$extra_arg" ]]; then
+                        extra_arg="$1"
+                    fi
+                    shift
+                    ;;
+            esac
+        done
         outfile=$(seed_filename "bootstrap")
         log_info "Seeds will be written to: $outfile"
 
         if [[ "$extra_arg" == "--mux" ]]; then
-            # Collect 2-device input on the fly, mux it, use as extra data
             mux_tmp=$(seed_filename "mux-extra")
             log_info "Collecting extra entropy via 2-device mux..."
             "$SCRIPT_DIR/yubi-mux.sh" "$mux_tmp"
             log_info "Muxed extra data: $mux_tmp"
-            "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" "$mux_tmp"
-            # Secure delete the mux temp — it's been mixed in
-            source "$SCRIPT_DIR/yubi-lib.sh"
+            "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" "$mux_tmp" \
+                "${passthrough_args[@]+"${passthrough_args[@]}"}"
             secure_delete "$mux_tmp" true
         elif [[ -n "$extra_arg" && -f "$extra_arg" ]]; then
             log_info "Extra entropy from: $extra_arg"
-            exec "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" "$extra_arg"
+            exec "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" "$extra_arg" \
+                "${passthrough_args[@]+"${passthrough_args[@]}"}"
         else
-            exec "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count"
+            exec "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" \
+                "${passthrough_args[@]+"${passthrough_args[@]}"}"
         fi
         ;;
 
@@ -198,11 +231,22 @@ case "$CMD" in
 
     enrich)
         ensure_seed_dir
-        # Find the latest seed file to enrich
+        # Parse enrich args, separating passthrough flags
         infile=""
-        if [[ $# -ge 1 ]]; then
-            infile="$1"
-        else
+        passthrough_args=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --no-external)  passthrough_args+=(--no-external); shift ;;
+                --entropy-file) passthrough_args+=(--entropy-file "$2"); shift 2 ;;
+                *)
+                    if [[ -z "$infile" ]]; then
+                        infile="$1"
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+        if [[ -z "$infile" ]]; then
             infile=$(find_active_pool) || true
             if [[ -z "$infile" ]]; then
                 log_err "No seed files found in $SEED_DIR"
@@ -213,7 +257,22 @@ case "$CMD" in
         outfile=$(seed_filename "enriched")
         log_info "Enriching: $infile"
         log_info "Output:    $outfile"
-        exec "$SCRIPT_DIR/entropy-mix.sh" "$infile" "$outfile"
+        exec "$SCRIPT_DIR/entropy-mix.sh" "$infile" "$outfile" \
+            "${passthrough_args[@]+"${passthrough_args[@]}"}"
+        ;;
+
+    # ----- Entropy collection (air-gapped workflows) -----
+
+    entropy-collect)
+        exec "$SCRIPT_DIR/entropy-collect.sh" "$@"
+        ;;
+
+    entropy-verify)
+        if [[ $# -lt 1 ]]; then
+            log_err "Usage: yubi.sh entropy-verify <entropy_file>"
+            exit 1
+        fi
+        exec "$SCRIPT_DIR/entropy-verify.sh" "$@"
         ;;
 
     # ----- Key programming -----
@@ -248,17 +307,31 @@ case "$CMD" in
     init)
         require_ykman
         if [[ $# -lt 1 ]]; then
-            log_err "Usage: yubi.sh init <mode> [serial]"
+            log_err "Usage: yubi.sh init <mode> [serial] [--no-external|--entropy-file PATH]"
             exit 1
         fi
-        mode="$1"
-        serial="${2:-}"
+        mode="$1"; shift
+        serial=""
+        passthrough_args=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --no-external)  passthrough_args+=(--no-external); shift ;;
+                --entropy-file) passthrough_args+=(--entropy-file "$2"); shift 2 ;;
+                *)
+                    if [[ -z "$serial" ]]; then
+                        serial="$1"
+                    fi
+                    shift
+                    ;;
+            esac
+        done
 
         if [[ -z "$serial" ]]; then
             serial=$(detect_serial)
         fi
 
-        exec "$SCRIPT_DIR/init-yubi.sh" "$mode" "$serial"
+        exec "$SCRIPT_DIR/init-yubi.sh" "$mode" "$serial" \
+            "${passthrough_args[@]+"${passthrough_args[@]}"}"
         ;;
 
     # ----- Info commands -----

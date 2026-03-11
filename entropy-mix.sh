@@ -11,34 +11,62 @@ set -euo pipefail
 umask 077       # New files owner-only
 ulimit -c 0     # Disable core dumps
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/yubi-lib.sh"
+
 # --- Configuration ---
-RETRY_MAX=3
-RETRY_DELAY=2
 API_BATCH_SIZE=10  # how many random values per API call
 HKDF_KEYLEN=32     # 32 bytes = 44 char base64
 
-# --- Color output ---
-RED='\033[0;31m'
-YLW='\033[0;33m'
-GRN='\033[0;32m'
-CYN='\033[0;36m'
-RST='\033[0m'
-
-log_info()  { printf "${CYN}[INFO]${RST}  %s\n" "$*"; }
-log_ok()    { printf "${GRN}[OK]${RST}    %s\n" "$*"; }
-log_warn()  { printf "${YLW}[WARN]${RST}  %s\n" "$*"; }
-log_err()   { printf "${RED}[ERR]${RST}   %s\n" "$*" >&2; }
-
 # --- Argument handling ---
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <input_file> [output_file]"
-    echo "  input_file:  text file with one YubiKey password per line"
-    echo "  output_file: defaults to <input_file>.mixed"
+    cat <<'USAGE'
+Usage: entropy-mix.sh <input_file> [output_file] [options]
+
+  input_file:  text file with one YubiKey password per line
+  output_file: defaults to <input_file>.mixed
+
+Options:
+  --no-external         Skip external API calls (local entropy only)
+  --entropy-file PATH   Use pre-collected entropy file instead of live APIs
+USAGE
     exit 1
 fi
 
-INPUT_FILE="$1"
-OUTPUT_FILE="${2:-${INPUT_FILE}.mixed}"
+# Parse arguments
+INPUT_FILE=""
+OUTPUT_FILE=""
+NO_EXTERNAL=false
+ENTROPY_FILE_PATH=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-external)
+            NO_EXTERNAL=true
+            shift
+            ;;
+        --entropy-file)
+            ENTROPY_FILE_PATH="$2"
+            shift 2
+            ;;
+        -*)
+            log_err "Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            if [[ -z "$INPUT_FILE" ]]; then
+                INPUT_FILE="$1"
+            elif [[ -z "$OUTPUT_FILE" ]]; then
+                OUTPUT_FILE="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$OUTPUT_FILE" ]]; then
+    OUTPUT_FILE="${INPUT_FILE}.mixed"
+fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
     log_err "Input file not found: $INPUT_FILE"
@@ -122,31 +150,9 @@ collect_jitter_perline() {
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
 }
 
-# --- External API functions with retry+degrade ---
-
-# Calls an external source. Returns hex entropy or empty string on failure.
-# Usage: call_external <name> <curl_args...>
-call_external() {
-    local name="$1"; shift
-    local attempt=0
-    local response=""
-
-    while (( attempt < RETRY_MAX )); do
-        attempt=$(( attempt + 1 ))
-        response=$(curl -sf --max-time 10 "$@" 2>/dev/null) && break
-        log_warn "$name: attempt $attempt/$RETRY_MAX failed, retrying in ${RETRY_DELAY}s..."
-        sleep "$RETRY_DELAY"
-        response=""
-    done
-
-    if [[ -z "$response" ]]; then
-        log_warn "$name: ALL RETRIES FAILED — degrading (source excluded)"
-        echo ""
-        return 1
-    fi
-    echo "$response"
-    return 0
-}
+# External API functions are provided by yubi-lib.sh (call_external,
+# get_external_entropy). The batch collection functions below use the
+# shared call_external() with retry+degrade.
 
 collect_random_org_batch() {
     local count=$1
@@ -154,9 +160,7 @@ collect_random_org_batch() {
     local url="https://www.random.org/integers/?num=${count}&min=0&max=1000000000&col=1&base=10&format=plain&rnd=new"
     local raw
     raw=$(call_external "random.org" "$url") || { echo ""; return 1; }
-    # Hash each line to hex
     printf '%s' "$raw" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
-    # Store raw values for per-line distribution
     RANDOM_ORG_RAW="$raw"
     return 0
 }
@@ -190,7 +194,6 @@ collect_drand_batch() {
     local count=$1
     log_info "drand: requesting $count beacon rounds..."
     local data=""
-    # Fetch latest round plus previous rounds for additional entropy
     local calls=$(( (count + API_BATCH_SIZE - 1) / API_BATCH_SIZE ))
     (( calls < 1 )) && calls=1
     (( calls > 3 )) && calls=3
@@ -200,7 +203,6 @@ collect_drand_batch() {
         raw=$(call_external "drand" \
             "https://drand.cloudflare.com/public/latest") || continue
         data+="$raw"
-        # Small delay to get different rounds
         sleep 0.5
     done
 
@@ -269,12 +271,6 @@ hkdf_mix() {
 
 log_info "=== Collecting batch external entropy ==="
 
-# Calculate API batch sizes: ~3 calls per source, distribute across lines
-api_calls=$(( (LINE_COUNT + API_BATCH_SIZE - 1) / API_BATCH_SIZE ))
-(( api_calls < 1 )) && api_calls=1
-(( api_calls > 3 )) && api_calls=3
-batch_size=$(( (LINE_COUNT + api_calls - 1) / api_calls ))
-
 RANDOM_ORG_RAW=""
 NIST_BEACON_RAW=""
 DRAND_RAW=""
@@ -283,36 +279,53 @@ DRAND_RAW=""
 ext_sources_ok=0
 ext_sources_failed=()
 
-if collect_random_org_batch "$batch_size"; then
-    log_ok "random.org: collected"
-    ext_sources_ok=$(( ext_sources_ok + 1 ))
+if [[ "$NO_EXTERNAL" == "true" ]]; then
+    log_info "External entropy: disabled (--no-external)"
+elif [[ -n "$ENTROPY_FILE_PATH" ]]; then
+    # Load from pre-collected entropy file
+    log_info "Loading external entropy from file: $ENTROPY_FILE_PATH"
+    load_external_entropy "$ENTROPY_FILE_PATH"
+    ext_sources_ok="$EXT_SOURCES_OK"
+    # Map to the RAW variables used by pick_entropy_for_line
+    RANDOM_ORG_RAW="$EXT_RANDOM_ORG"
+    NIST_BEACON_RAW="$EXT_NIST"
+    DRAND_RAW="$EXT_DRAND"
 else
-    ext_sources_failed+=("random.org")
+    # Live API fetch (original behavior)
+    api_calls=$(( (LINE_COUNT + API_BATCH_SIZE - 1) / API_BATCH_SIZE ))
+    (( api_calls < 1 )) && api_calls=1
+    (( api_calls > 3 )) && api_calls=3
+    batch_size=$(( (LINE_COUNT + api_calls - 1) / api_calls ))
+
+    if collect_random_org_batch "$batch_size"; then
+        log_ok "random.org: collected"
+        ext_sources_ok=$(( ext_sources_ok + 1 ))
+    else
+        ext_sources_failed+=("random.org")
+    fi
+
+    if collect_nist_beacon_batch "$batch_size"; then
+        log_ok "NIST Beacon: collected"
+        ext_sources_ok=$(( ext_sources_ok + 1 ))
+    else
+        ext_sources_failed+=("NIST Beacon")
+    fi
+
+    if collect_drand_batch "$api_calls"; then
+        log_ok "drand: collected"
+        ext_sources_ok=$(( ext_sources_ok + 1 ))
+    else
+        ext_sources_failed+=("drand")
+    fi
+
+    if [[ ${#ext_sources_failed[@]} -gt 0 ]]; then
+        log_warn "Failed external sources: ${ext_sources_failed[*]}"
+    fi
 fi
 
-if collect_nist_beacon_batch "$batch_size"; then
-    log_ok "NIST Beacon: collected"
-    ext_sources_ok=$(( ext_sources_ok + 1 ))
-else
-    ext_sources_failed+=("NIST Beacon")
-fi
-
-if collect_drand_batch "$api_calls"; then
-    log_ok "drand: collected"
-    ext_sources_ok=$(( ext_sources_ok + 1 ))
-else
-    ext_sources_failed+=("drand")
-fi
-
-# Report external source status
-if [[ ${#ext_sources_failed[@]} -gt 0 ]]; then
-    log_warn "Failed external sources: ${ext_sources_failed[*]}"
-fi
 log_info "External sources available: $ext_sources_ok/3"
 
-# Minimum viable: need CPU + at least 1 local sensor + 1 external
-# But we degrade gracefully — warn if below ideal
-if (( ext_sources_ok == 0 )); then
+if (( ext_sources_ok == 0 )) && [[ "$NO_EXTERNAL" == "false" ]]; then
     log_warn "NO external sources available — output relies on local entropy only"
     log_warn "Consider re-running when network is available for stronger mixing"
 fi

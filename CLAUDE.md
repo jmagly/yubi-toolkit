@@ -18,9 +18,11 @@ A bash toolkit for generating high-entropy cryptographic seeds and fully initial
 | Script | Purpose |
 |--------|---------|
 | `yubi.sh` | Unified entry point — all commands route through here |
-| `yubi-lib.sh` | Shared library (logging, secure delete, tmpfs workspace, validation) |
+| `yubi-lib.sh` | Shared library (logging, secure delete, tmpfs, entropy file I/O) |
 | `bootstrap-entropy.sh` | Interactive seed generation from multiple entropy sources |
 | `entropy-mix.sh` | Batch HKDF-SHA512 enrichment of password lists |
+| `entropy-collect.sh` | Standalone external entropy collection for air-gapped workflows |
+| `entropy-verify.sh` | Entropy file integrity validation and reporting |
 | `yubi-mux.sh` | 2-device password collection and random pairing |
 | `configure-yubi.sh` | YubiKey programmer (PIV + OTP slots) |
 | `init-yubi.sh` | End-to-end pipeline (collect -> mux -> enrich -> program) |
@@ -37,6 +39,12 @@ A bash toolkit for generating high-entropy cryptographic seeds and fully initial
 # Full pipeline: 2 source keys -> program target
 ./yubi.sh init <otp|static|mixed> [serial]
 
+# Air-gapped workflow
+./yubi.sh entropy-collect [--append file]  # On networked machine
+./yubi.sh entropy-verify <file>            # Validate collected entropy
+./yubi.sh bootstrap 15 --entropy-file <file>  # On air-gapped machine
+./yubi.sh bootstrap 15 --no-external       # Skip APIs entirely
+
 # Info commands
 ./yubi.sh list          # Connected YubiKeys
 ./yubi.sh info [serial] # Key details
@@ -47,10 +55,12 @@ A bash toolkit for generating high-entropy cryptographic seeds and fully initial
 ## Architecture
 
 - **Single directory**: All scripts live at project root, no subdirectories for source code
-- **Shared library**: `yubi-lib.sh` is sourced by all other scripts for common functions
+- **Shared library**: `yubi-lib.sh` is sourced by all other scripts for common functions (logging, secure delete, entropy file format, external API calls)
 - **Seed storage**: `~/.yubikey-seeds/` (mode 700) with timestamped seed files
+- **Entropy files**: Portable `YUBI-ENTROPY-V1` text format for air-gapped external entropy transfer
 - **Secure workspace**: `init` mode uses tmpfs (RAM) — sensitive data never touches disk
 - **Entropy mixing**: HKDF with user entropy as IKM, system entropy as salt, unique per-seed labels for domain separation
+- **External entropy dispatcher**: `get_external_entropy()` in yubi-lib.sh handles three modes: live API fetch, file-based loading (`--entropy-file`), or disabled (`--no-external`)
 
 ## Security Conventions
 

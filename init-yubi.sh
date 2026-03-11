@@ -27,20 +27,36 @@ require_openssl3
 
 # --- Arguments ---
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <MODE> <SERIAL>"
-    echo ""
-    echo "  MODE:   'otp'    = both OTP slots Yubico OTP"
-    echo "          'static' = both OTP slots static password"
-    echo "          'mixed'  = slot 1 OTP + slot 2 static"
-    echo "  SERIAL: target YubiKey serial (run 'ykman list --serials')"
-    echo ""
-    echo "You will be prompted to tap 2 source YubiKeys for entropy input."
+    cat <<'USAGE'
+Usage: init-yubi.sh <MODE> <SERIAL> [options]
+
+  MODE:   'otp'    = both OTP slots Yubico OTP
+          'static' = both OTP slots static password
+          'mixed'  = slot 1 OTP + slot 2 static
+  SERIAL: target YubiKey serial (run 'ykman list --serials')
+
+Options:
+  --entropy-file PATH   Use pre-collected entropy file instead of live APIs
+  --no-external         Skip external API calls (local entropy only)
+
+You will be prompted to tap 2 source YubiKeys for entropy input.
+USAGE
     exit 1
 fi
 
-MODE="$1"
-SERIAL="$2"
+MODE="$1"; shift
+SERIAL="$1"; shift
 LINES_REQUIRED=5
+NO_EXTERNAL=false
+ENTROPY_FILE_PATH=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-external) NO_EXTERNAL=true; shift ;;
+        --entropy-file) ENTROPY_FILE_PATH="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
 
 validate_mode "$MODE"
 validate_serial "$SERIAL"
@@ -379,55 +395,18 @@ log_info "============================================"
 log_info " Step 4: Entropy enrichment (API calls now)"
 log_info "============================================"
 
-# --- External entropy (batched, retry+degrade) ---
-RETRY_MAX=3
-RETRY_DELAY=2
+# --- External entropy via shared dispatcher ---
+ext_args=()
+[[ "$NO_EXTERNAL" == "true" ]] && ext_args+=(--no-external)
+[[ -n "$ENTROPY_FILE_PATH" ]] && ext_args+=(--entropy-file "$ENTROPY_FILE_PATH")
 
-call_external() {
-    local name="$1"; shift
-    local attempt=0
-    local response=""
-    while (( attempt < RETRY_MAX )); do
-        attempt=$(( attempt + 1 ))
-        response=$(curl -sf --max-time 10 "$@" 2>/dev/null) && break
-        log_warn "$name: attempt $attempt/$RETRY_MAX failed"
-        sleep "$RETRY_DELAY"
-        response=""
-    done
-    if [[ -z "$response" ]]; then
-        log_warn "$name: ALL RETRIES FAILED — degrading"
-        echo ""; return 1
-    fi
-    echo "$response"; return 0
-}
+get_external_entropy "${ext_args[@]+"${ext_args[@]}"}"
+ext_sources_ok="$EXT_SOURCES_OK"
 
-ext_sources_ok=0
-
-log_info "Fetching random.org..."
-random_org_raw=""
-if random_org_raw=$(call_external "random.org" \
-    "https://www.random.org/integers/?num=3&min=0&max=1000000000&col=1&base=10&format=plain&rnd=new"); then
-    log_ok "random.org"
-    ext_sources_ok=$(( ext_sources_ok + 1 ))
-fi
-
-log_info "Fetching NIST Beacon..."
-nist_raw=""
-if nist_raw=$(call_external "NIST Beacon" \
-    "https://beacon.nist.gov/beacon/2.0/pulse/last"); then
-    log_ok "NIST Beacon"
-    ext_sources_ok=$(( ext_sources_ok + 1 ))
-fi
-
-log_info "Fetching drand..."
-drand_raw=""
-if drand_raw=$(call_external "drand" \
-    "https://drand.cloudflare.com/public/latest"); then
-    log_ok "drand"
-    ext_sources_ok=$(( ext_sources_ok + 1 ))
-fi
-
-log_info "External sources: $ext_sources_ok/3"
+# Map to local variable names used by enrich_seed()
+random_org_raw="$EXT_RANDOM_ORG"
+nist_raw="$EXT_NIST"
+drand_raw="$EXT_DRAND"
 
 # --- Local entropy baselines ---
 log_info "Collecting local sensor baselines..."

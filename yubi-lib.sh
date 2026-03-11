@@ -201,3 +201,366 @@ secure_tmpfs_cleanup() {
     SECURE_TMPFS_DIR=""
     SECURE_TMPFS_MOUNTED=false
 }
+
+# =============================================================================
+# External entropy: shared fetch with retry+degrade
+# =============================================================================
+#
+# Consolidated from bootstrap-entropy.sh, entropy-mix.sh, and init-yubi.sh.
+# All three scripts previously had identical call_external() implementations.
+
+ENTROPY_RETRY_MAX=3
+ENTROPY_RETRY_DELAY=2
+
+# Fetch from an external URL with retry and graceful degradation.
+# Usage: call_external <name> <curl_args...>
+# Returns: response on stdout, exit 0 on success, exit 1 on failure
+call_external() {
+    local name="$1"; shift
+    local attempt=0
+    local response=""
+    while (( attempt < ENTROPY_RETRY_MAX )); do
+        attempt=$(( attempt + 1 ))
+        response=$(curl -sf --max-time 10 "$@" 2>/dev/null) && break
+        log_warn "$name: attempt $attempt/$ENTROPY_RETRY_MAX failed"
+        sleep "$ENTROPY_RETRY_DELAY"
+        response=""
+    done
+    if [[ -z "$response" ]]; then
+        log_warn "$name: ALL RETRIES FAILED — degrading"
+        echo ""; return 1
+    fi
+    echo "$response"; return 0
+}
+
+# Fetch all three external entropy sources. Sets EXT_RANDOM_ORG, EXT_NIST,
+# EXT_DRAND variables and EXT_SOURCES_OK count.
+# Usage: fetch_all_external_entropy
+fetch_all_external_entropy() {
+    EXT_RANDOM_ORG=""
+    EXT_NIST=""
+    EXT_DRAND=""
+    EXT_SOURCES_OK=0
+
+    log_info "Fetching random.org..."
+    if EXT_RANDOM_ORG=$(call_external "random.org" \
+        "https://www.random.org/integers/?num=10&min=0&max=1000000000&col=1&base=10&format=plain&rnd=new"); then
+        log_ok "random.org"
+        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
+    fi
+
+    log_info "Fetching NIST Beacon..."
+    if EXT_NIST=$(call_external "NIST Beacon" \
+        "https://beacon.nist.gov/beacon/2.0/pulse/last"); then
+        log_ok "NIST Beacon"
+        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
+    fi
+
+    log_info "Fetching drand..."
+    if EXT_DRAND=$(call_external "drand" \
+        "https://drand.cloudflare.com/public/latest"); then
+        log_ok "drand"
+        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
+    fi
+
+    log_info "External sources: $EXT_SOURCES_OK/3"
+}
+
+# =============================================================================
+# Entropy file format: portable external entropy for air-gapped workflows
+# =============================================================================
+#
+# File format (text-based, inspectable with cat/grep/head):
+#
+#   YUBI-ENTROPY-V1
+#   SOURCE:<source_id>
+#   TIME:<iso8601_timestamp>
+#   HASH:<sha256_hex>
+#   SIZE:<byte_count>
+#   DATA:<base64_encoded_data>
+#   END
+#   SOURCE:<source_id>
+#   ...
+#
+# Source IDs: random.org, nist, drand
+
+ENTROPY_FILE_MAGIC="YUBI-ENTROPY-V1"
+
+# Write a single entropy block to an entropy file.
+# Usage: write_entropy_block <file> <source_id> <raw_data>
+write_entropy_block() {
+    local file="$1"
+    local source_id="$2"
+    local raw_data="$3"
+
+    if [[ -z "$raw_data" ]]; then
+        return 1
+    fi
+
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local b64_data
+    b64_data=$(printf '%s' "$raw_data" | openssl base64 -A)
+    local byte_count=${#raw_data}
+    local hash
+    hash=$(printf '%s' "$raw_data" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
+
+    {
+        printf 'SOURCE:%s\n' "$source_id"
+        printf 'TIME:%s\n' "$timestamp"
+        printf 'HASH:%s\n' "$hash"
+        printf 'SIZE:%d\n' "$byte_count"
+        printf 'DATA:%s\n' "$b64_data"
+        printf 'END\n'
+    } >> "$file"
+}
+
+# Initialize a new entropy file with magic header.
+# Usage: init_entropy_file <file>
+init_entropy_file() {
+    local file="$1"
+    printf '%s\n' "$ENTROPY_FILE_MAGIC" > "$file"
+    chmod 600 "$file"
+}
+
+# Validate an entropy file's structure and integrity.
+# Usage: validate_entropy_file <file>
+# Returns: 0 if valid, 1 if invalid. Prints diagnostics to stderr.
+validate_entropy_file() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_err "Entropy file not found: $file"
+        return 1
+    fi
+
+    # Check magic header
+    local header
+    header=$(head -1 "$file")
+    if [[ "$header" != "$ENTROPY_FILE_MAGIC" ]]; then
+        log_err "Invalid entropy file: bad magic header (expected $ENTROPY_FILE_MAGIC)"
+        return 1
+    fi
+
+    # Check file permissions
+    local perms
+    perms=$(stat -c '%a' "$file" 2>/dev/null)
+    if [[ "$perms" != "600" ]]; then
+        log_warn "Entropy file permissions are $perms (recommended: 600)"
+    fi
+
+    # Parse and validate blocks
+    local block_count=0
+    local corrupt=0
+    local in_block=false
+    local cur_source="" cur_hash="" cur_data="" cur_size=""
+
+    while IFS= read -r line; do
+        case "$line" in
+            SOURCE:*)
+                in_block=true
+                cur_source="${line#SOURCE:}"
+                cur_hash="" cur_data="" cur_size=""
+                ;;
+            HASH:*)
+                cur_hash="${line#HASH:}"
+                ;;
+            SIZE:*)
+                cur_size="${line#SIZE:}"
+                ;;
+            DATA:*)
+                cur_data="${line#DATA:}"
+                ;;
+            END)
+                if [[ "$in_block" == "true" && -n "$cur_data" && -n "$cur_hash" ]]; then
+                    # Verify hash
+                    local decoded
+                    decoded=$(printf '%s' "$cur_data" | openssl base64 -d -A 2>/dev/null)
+                    local computed_hash
+                    computed_hash=$(printf '%s' "$decoded" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
+                    if [[ "$computed_hash" == "$cur_hash" ]]; then
+                        block_count=$(( block_count + 1 ))
+                    else
+                        log_err "Block $cur_source: hash mismatch (expected $cur_hash, got $computed_hash)"
+                        corrupt=$(( corrupt + 1 ))
+                    fi
+                fi
+                in_block=false
+                ;;
+        esac
+    done < "$file"
+
+    if [[ $block_count -eq 0 ]]; then
+        log_err "Entropy file contains no valid blocks"
+        return 1
+    fi
+
+    if [[ $corrupt -gt 0 ]]; then
+        log_err "$corrupt block(s) failed integrity check"
+        return 1
+    fi
+
+    return 0
+}
+
+# Extract entropy for a specific source from an entropy file.
+# Concatenates all blocks for that source (multiple collections = more entropy).
+# Usage: extract_source_entropy <file> <source_id>
+# Returns: raw concatenated data on stdout
+extract_source_entropy() {
+    local file="$1"
+    local source_id="$2"
+    local result=""
+    local in_target=false
+
+    while IFS= read -r line; do
+        case "$line" in
+            SOURCE:${source_id})
+                in_target=true
+                ;;
+            SOURCE:*)
+                in_target=false
+                ;;
+            DATA:*)
+                if [[ "$in_target" == "true" ]]; then
+                    local decoded
+                    decoded=$(printf '%s' "${line#DATA:}" | openssl base64 -d -A 2>/dev/null)
+                    result+="$decoded"
+                fi
+                ;;
+            END)
+                in_target=false
+                ;;
+        esac
+    done < "$file"
+
+    printf '%s' "$result"
+}
+
+# Load external entropy from a pre-collected file into EXT_RANDOM_ORG,
+# EXT_NIST, EXT_DRAND variables (same interface as fetch_all_external_entropy).
+# Usage: load_external_entropy <file>
+load_external_entropy() {
+    local file="$1"
+    EXT_RANDOM_ORG=""
+    EXT_NIST=""
+    EXT_DRAND=""
+    EXT_SOURCES_OK=0
+
+    if ! validate_entropy_file "$file"; then
+        return 1
+    fi
+
+    EXT_RANDOM_ORG=$(extract_source_entropy "$file" "random.org")
+    if [[ -n "$EXT_RANDOM_ORG" ]]; then
+        log_ok "Loaded random.org entropy from file"
+        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
+    fi
+
+    EXT_NIST=$(extract_source_entropy "$file" "nist")
+    if [[ -n "$EXT_NIST" ]]; then
+        log_ok "Loaded NIST Beacon entropy from file"
+        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
+    fi
+
+    EXT_DRAND=$(extract_source_entropy "$file" "drand")
+    if [[ -n "$EXT_DRAND" ]]; then
+        log_ok "Loaded drand entropy from file"
+        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
+    fi
+
+    log_info "Loaded $EXT_SOURCES_OK/3 sources from entropy file"
+}
+
+# Dispatcher: get external entropy from the appropriate source.
+# Usage: get_external_entropy [--no-external] [--entropy-file <path>]
+#   Sets EXT_RANDOM_ORG, EXT_NIST, EXT_DRAND, EXT_SOURCES_OK
+get_external_entropy() {
+    local no_external=false
+    local entropy_file=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-external) no_external=true; shift ;;
+            --entropy-file) entropy_file="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ "$no_external" == "true" ]]; then
+        EXT_RANDOM_ORG=""
+        EXT_NIST=""
+        EXT_DRAND=""
+        EXT_SOURCES_OK=0
+        log_info "External entropy: disabled (--no-external)"
+        return 0
+    fi
+
+    if [[ -n "$entropy_file" ]]; then
+        log_info "Loading external entropy from file: $entropy_file"
+        load_external_entropy "$entropy_file"
+        return 0
+    fi
+
+    # Default: live API fetch
+    fetch_all_external_entropy
+    return 0
+}
+
+# Report entropy file contents (for entropy-verify).
+# Usage: report_entropy_file <file>
+report_entropy_file() {
+    local file="$1"
+    local block_count=0
+    local sources=()
+    local earliest="" latest=""
+    local total_size=0
+
+    while IFS= read -r line; do
+        case "$line" in
+            SOURCE:*)
+                local src="${line#SOURCE:}"
+                # Track unique sources
+                local found=false
+                for s in "${sources[@]+"${sources[@]}"}"; do
+                    [[ "$s" == "$src" ]] && found=true
+                done
+                [[ "$found" == "false" ]] && sources+=("$src")
+                ;;
+            TIME:*)
+                local ts="${line#TIME:}"
+                if [[ -z "$earliest" || "$ts" < "$earliest" ]]; then
+                    earliest="$ts"
+                fi
+                if [[ -z "$latest" || "$ts" > "$latest" ]]; then
+                    latest="$ts"
+                fi
+                ;;
+            SIZE:*)
+                total_size=$(( total_size + ${line#SIZE:} ))
+                ;;
+            END)
+                block_count=$(( block_count + 1 ))
+                ;;
+        esac
+    done < "$file"
+
+    echo ""
+    log_info "Entropy file: $(basename "$file")"
+    log_info "Blocks:       $block_count"
+    log_info "Sources:      ${sources[*]+"${sources[*]}"}"
+    log_info "Total size:   $total_size bytes"
+    log_info "Time range:   ${earliest:-n/a} — ${latest:-n/a}"
+
+    # Staleness check
+    if [[ -n "$latest" ]]; then
+        local latest_epoch
+        latest_epoch=$(date -d "$latest" +%s 2>/dev/null || echo 0)
+        local now_epoch
+        now_epoch=$(date +%s)
+        local age_days=$(( (now_epoch - latest_epoch) / 86400 ))
+        if [[ $age_days -gt 30 ]]; then
+            log_warn "All blocks are >30 days old — consider collecting fresh entropy"
+        fi
+    fi
+}
