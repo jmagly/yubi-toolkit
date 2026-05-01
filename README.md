@@ -15,7 +15,7 @@ Every seed is mixed from **all available sources** via HKDF-SHA512:
 | Keyboard timing | Interactive | Nanosecond inter-keystroke intervals (2 rounds, 50 chars each) |
 | Mouse movement | Interactive | X11 cursor position sampling (80 samples at 50ms) |
 | CPU RDRAND | Local | `/dev/urandom` -- fresh per seed |
-| Thermal sensors | Local | sysfs thermal zones + lm-sensors (baseline + fresh per seed) |
+| Thermal sensors | Local | Linux: sysfs thermal zones + lm-sensors. macOS: sysctl + vm_stat + ioreg power state. (baseline + fresh per seed on both) |
 | Disk I/O jitter | Local | Timing variance of urandom reads (baseline + fresh per seed) |
 | random.org | External | Atmospheric noise integers |
 | NIST Beacon | External | Randomness beacon pulse |
@@ -45,21 +45,58 @@ chmod +x *.sh
 ./yubi.sh init otp
 ```
 
+The toolkit runs on **Linux** and **macOS** (Apple Silicon and Intel). Pick your platform below for install instructions.
+
 ## Requirements
 
-- `bash` 4.0+
-- `openssl` 3.x (HKDF support via `openssl kdf`)
-- `ykman` (YubiKey Manager CLI) -- `sudo apt install yubikey-manager`
-- `curl`
-- `sensors` (lm-sensors) -- `sudo apt install lm-sensors`
-- `python3` (for keyboard timing and mouse capture)
-- X11 display (for mouse entropy; falls back to extra keyboard round if unavailable)
+| Component | Linux | macOS |
+|-----------|-------|-------|
+| `bash` | 4.0+ (default on modern distros) | 3.2.57+ (Apple's stock `/bin/bash` works -- no upgrade needed) |
+| `openssl` | 3.x (`openssl kdf` subcommand required) | 3.x via Homebrew (Apple's `/usr/bin/openssl` is LibreSSL and won't work) |
+| `ykman` | YubiKey Manager CLI | YubiKey Manager CLI |
+| `curl` | yes | yes (preinstalled) |
+| `python3` | for keyboard timing and mouse capture | for keyboard timing (preinstalled) |
+| Thermal sensors | `lm-sensors` (optional, sysfs always works) | not needed -- uses `sysctl`/`ioreg` automatically |
+| Mouse capture | X11 display (auto-falls back to extra keyboard round if unavailable) | not currently supported -- always falls back to keyboard |
+
+The scripts auto-detect the platform at runtime. There are no platform-specific scripts to choose between.
 
 ### Install dependencies (Debian/Ubuntu)
 
 ```bash
 sudo apt install yubikey-manager openssl curl lm-sensors python3
 ```
+
+### Install dependencies (Fedora/RHEL)
+
+```bash
+sudo dnf install yubikey-manager openssl curl lm_sensors python3
+```
+
+### Install dependencies (Arch Linux)
+
+```bash
+sudo pacman -S yubikey-manager openssl curl lm_sensors python
+```
+
+### Install dependencies (macOS)
+
+You need [Homebrew](https://brew.sh) installed first. Then:
+
+```bash
+brew install openssl@3 ykman
+```
+
+That's it. `bash`, `python3`, and `curl` ship with macOS. The toolkit automatically prepends `/opt/homebrew/opt/openssl@3/bin` (and `/usr/local/opt/openssl@3/bin` on Intel Macs) to `PATH` when sourced, so `openssl` resolves to Homebrew's OpenSSL 3.x rather than Apple's LibreSSL.
+
+If you see `LibreSSL detected` when running any command, your `PATH` is overriding the toolkit's bootstrap. Either run scripts from a fresh terminal or explicitly install: `brew install openssl@3`.
+
+#### macOS notes
+
+- **No `lm-sensors` needed** -- the toolkit collects equivalent system entropy from `sysctl`, `vm_stat`, and `ioreg` automatically.
+- **No X11 mouse capture** -- macOS uses Quartz, not X11. The toolkit automatically falls back to an extra keyboard entropy round, which provides strong entropy via nanosecond keystroke timing.
+- **No `tmpfs`** -- the `init` command's secure RAM workspace falls back to a disk-backed directory that is securely overwritten on cleanup. APFS encrypts data at rest, so the security gap is small.
+- **Apple's bash 3.2 works** -- you do not need to `brew install bash`. The toolkit avoids bash 4-only features.
 
 ## Commands
 
@@ -217,13 +254,13 @@ When combining passwords from 2 YubiKeys:
 
 Sensitive files are handled with defense-in-depth:
 
-- **RAM workspace** (`tmpfs`): `init` mode keeps all working files in RAM -- never touches disk
-- **Disk files**: 3-pass random overwrite + zero pass + `sync` + unlink + `fstrim` (SSD)
+- **RAM workspace** (`tmpfs`): `init` mode keeps all working files in RAM -- never touches disk (Linux, root only). On macOS and unprivileged Linux, falls back to a disk-backed directory that is securely overwritten on cleanup.
+- **Disk files**: 3-pass random overwrite + zero pass + `sync` + unlink + `fstrim` (SSD, Linux root). On macOS, APFS auto-TRIMs and encrypts at rest, so `fstrim` is a no-op.
 - **Consumed seeds**: Removed from pool file atomically after successful programming
 - **Empty pool files**: Auto-detected and securely wiped by `purge`
 - **Entropy files**: Created with mode 600 (owner-only read/write)
 
-Note: `shred` alone is insufficient on SSD/NVMe due to FTL wear leveling and filesystem journaling. The multi-pass approach provides defense in depth, and `tmpfs` avoids the problem entirely for ephemeral data.
+Note: `shred` alone is insufficient on SSD/NVMe due to FTL wear leveling and filesystem journaling. The multi-pass approach provides defense in depth, and `tmpfs` (where available) avoids the problem entirely for ephemeral data.
 
 ### Password Input Security
 
@@ -281,20 +318,28 @@ All seed file management is automatic -- you never need to specify paths.
 
 ## Troubleshooting
 
-### "OpenSSL 3.0+ required"
+### "LibreSSL detected" (macOS)
+Your `openssl` is resolving to Apple's `/usr/bin/openssl` (LibreSSL), which lacks the `kdf` subcommand. Install Homebrew OpenSSL: `brew install openssl@3`. The toolkit auto-prepends the brew path when scripts are sourced, so this typically resolves itself once `openssl@3` is installed. If you have a custom `PATH` that overrides this, ensure `/opt/homebrew/opt/openssl@3/bin` (Apple Silicon) or `/usr/local/opt/openssl@3/bin` (Intel) appears before `/usr/bin`.
+
+### "OpenSSL 3.0+ required" (Linux)
 Your system has OpenSSL 1.x. Upgrade to a newer OS (Ubuntu 22.04+) or install OpenSSL 3.x manually. The `openssl kdf` subcommand is required for HKDF and does not exist in 1.x.
 
 ### "No YubiKeys detected"
 Ensure `ykman` is installed and your YubiKey is inserted. Try `ykman list` to verify. If using USB-C, try a different port.
 
+On macOS, you may need to grant USB device access to your terminal app the first time you use ykman. If `ykman list` hangs, unplug and replug the key.
+
 ### Mouse entropy falls back to keyboard
-This happens when no X11 display is available (headless server, Wayland-only, SSH session). The toolkit automatically collects an extra keyboard entropy round instead. The security impact is minimal -- keyboard timing provides strong entropy.
+This happens when no X11 display is available -- always the case on macOS (which uses Quartz, not X11), and on headless Linux, Wayland-only sessions, or SSH sessions. The toolkit automatically collects an extra keyboard entropy round instead. The security impact is minimal -- keyboard timing provides strong entropy via nanosecond inter-keystroke intervals.
 
 ### External API failures
 All external sources (random.org, NIST Beacon, drand) degrade gracefully. If all three fail, seeds are generated from local entropy only. For environments without network access, use `--no-external` or the air-gapped workflow with `--entropy-file`.
 
 ### Entropy file validation fails
 Run `yubi.sh entropy-verify <file>` for diagnostics. Common causes: file was truncated during transfer, or modified after collection (SHA-256 mismatch).
+
+### "command not found: now_ns" or similar (macOS)
+You ran one of the helper scripts (e.g. `bootstrap-entropy.sh`) directly without sourcing through `yubi.sh`, AND your `bash` is exiting before `yubi-lib.sh` is fully loaded. Always invoke commands via `./yubi.sh <subcommand>` -- the unified entry point sources the library correctly.
 
 ## License
 

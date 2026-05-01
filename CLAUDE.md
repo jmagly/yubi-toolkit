@@ -8,10 +8,12 @@ A bash toolkit for generating high-entropy cryptographic seeds and fully initial
 
 ## Tech Stack
 
-- **Language**: Bash (pure shell, no compiled components)
-- **Runtime**: bash 4.0+, OpenSSL 3.x (HKDF support), Python 3 (keyboard/mouse capture)
-- **Hardware**: YubiKey Manager CLI (`ykman`), X11 (mouse entropy)
-- **Dependencies**: `curl`, `lm-sensors`, `openssl`, `ykman`, `python3`
+- **Language**: Bash (pure shell, no compiled components). Targets bash 3.2.57+ to support Apple's stock `/bin/bash` on macOS — avoid `declare -A`, `mapfile`, `${var,,}`, `${var^^}`, and other bash 4+ features.
+- **Runtime**: OpenSSL 3.x via `openssl kdf` (LibreSSL does not have this subcommand), Python 3 (keyboard/mouse capture)
+- **Platforms**: Linux (GNU coreutils, sysfs, lm-sensors, X11) and macOS (BSD coreutils, sysctl/ioreg, Quartz). Runtime-branched via `_IS_MACOS` flag set in `yubi-lib.sh`. **Both must keep working** — avoid Linux-only or Mac-only paths without the branch.
+- **Hardware**: YubiKey Manager CLI (`ykman`), X11 (Linux only — mouse entropy; falls back to keyboard otherwise)
+- **Dependencies**: `curl`, `openssl 3.x`, `ykman`, `python3`. Optional: `lm-sensors` (Linux only — `system_thermal_entropy()` handles macOS via sysctl/ioreg).
+- **macOS install**: `brew install openssl@3 ykman` (Apple's bash 3.2 + system python3/curl are sufficient). `yubi-lib.sh` auto-prepends `/opt/homebrew/opt/openssl@3/bin` to PATH on Darwin so `openssl` resolves to brew OpenSSL 3.x rather than `/usr/bin/openssl` (LibreSSL).
 
 ## Scripts
 
@@ -56,9 +58,10 @@ A bash toolkit for generating high-entropy cryptographic seeds and fully initial
 
 - **Single directory**: All scripts live at project root, no subdirectories for source code
 - **Shared library**: `yubi-lib.sh` is sourced by all other scripts for common functions (logging, secure delete, entropy file format, external API calls)
+- **Portability layer**: `yubi-lib.sh` exposes wrappers used in place of platform-specific commands. **Use these instead of calling `stat`/`date`/`df` directly:** `now_ns`, `file_size`, `file_perms`, `file_mtime`, `df_target`, `iso_to_epoch`, `system_thermal_entropy`. These hide GNU-vs-BSD coreutils differences and `date +%s%N` (which doesn't exist on macOS).
 - **Seed storage**: `~/.yubikey-seeds/` (mode 700) with timestamped seed files
 - **Entropy files**: Portable `YUBI-ENTROPY-V1` text format for air-gapped external entropy transfer
-- **Secure workspace**: `init` mode uses tmpfs (RAM) — sensitive data never touches disk
+- **Secure workspace**: `init` mode uses tmpfs (RAM, Linux root only) — sensitive data never touches disk. Falls back to disk-backed + secure_delete on macOS or unprivileged Linux.
 - **Entropy mixing**: HKDF with user entropy as IKM, system entropy as salt, unique per-seed labels for domain separation
 - **External entropy dispatcher**: `get_external_entropy()` in yubi-lib.sh handles three modes: live API fetch, file-based loading (`--entropy-file`), or disabled (`--no-external`)
 
@@ -74,8 +77,10 @@ A bash toolkit for generating high-entropy cryptographic seeds and fully initial
 
 - No test framework — this is a security-sensitive interactive toolkit
 - Scripts are executable (`chmod +x *.sh`)
-- OpenSSL 3.x is required (1.x lacks `openssl kdf` command)
+- OpenSSL 3.x is required (1.x lacks `openssl kdf` command; LibreSSL also lacks it — relevant on macOS)
 - `ykman` passes credentials as CLI arguments — known `/proc` visibility limitation
+- **Cross-platform changes must be tested on both Linux and macOS.** Mutsu (macOS 26.4.1, ARM64, bash 3.2.57) is the canonical Mac test target; access via `ssh mutsu-agent`. Use `bash -n <script>` to syntax-check on bash 3.2 before declaring done.
+- When adding new commands or features, prefer the portability wrappers (`now_ns`, `file_size`, etc.) over direct `stat`/`date` calls. If you must add a platform-specific path, branch on `_IS_MACOS` and ensure both branches are exercised.
 
 ---
 
