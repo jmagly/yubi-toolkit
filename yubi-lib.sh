@@ -5,6 +5,120 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/yubi-lib.sh"
 
 # =============================================================================
+# Platform detection and PATH bootstrap
+# =============================================================================
+#
+# Linux: GNU coreutils, OpenSSL 3.x at /usr/bin/openssl, /sys/class/thermal,
+#        lm-sensors, fstrim — all expected on PATH.
+# macOS: BSD coreutils (no `stat -c`, no `date +%s%N`, no `date -d`),
+#        /usr/bin/openssl is LibreSSL (no `openssl kdf`), no /sys/class/thermal,
+#        no lm-sensors, no fstrim. brew openssl@3 + ykman expected via Homebrew.
+#
+# We prepend Homebrew prefixes to PATH so `openssl` resolves to OpenSSL 3.x and
+# `ykman` is found, then provide portable wrappers for stat/date/thermal.
+
+case "$(uname -s 2>/dev/null)" in
+    Darwin) _IS_MACOS=true ;;
+    *)      _IS_MACOS=false ;;
+esac
+
+if [[ "$_IS_MACOS" == "true" ]]; then
+    # Prefer brew openssl@3 over LibreSSL at /usr/bin/openssl
+    for _brew_prefix in /opt/homebrew/opt/openssl@3/bin /usr/local/opt/openssl@3/bin \
+                        /opt/homebrew/bin /usr/local/bin; do
+        if [[ -d "$_brew_prefix" ]]; then
+            case ":$PATH:" in
+                *":$_brew_prefix:"*) ;;
+                *) PATH="$_brew_prefix:$PATH" ;;
+            esac
+        fi
+    done
+    unset _brew_prefix
+    export PATH
+fi
+
+# =============================================================================
+# Portable wrappers (GNU vs BSD coreutils)
+# =============================================================================
+
+# Nanosecond-resolution timestamp. macOS `date` lacks %N; fall back to python3.
+now_ns() {
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        python3 -c 'import time; print(time.time_ns())'
+    else
+        date +%s%N
+    fi
+}
+
+# File size in bytes.
+file_size() {
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        stat -f%z "$1" 2>/dev/null || echo 0
+    else
+        stat -c%s "$1" 2>/dev/null || echo 0
+    fi
+}
+
+# File permissions as octal (e.g. 600).
+file_perms() {
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        stat -f%A "$1" 2>/dev/null
+    else
+        stat -c%a "$1" 2>/dev/null
+    fi
+}
+
+# File modification time as "YYYY-MM-DD HH:MM:SS".
+file_mtime() {
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$1" 2>/dev/null
+    else
+        stat -c '%y' "$1" 2>/dev/null | cut -d. -f1
+    fi
+}
+
+# Mount point hosting <path>.
+df_target() {
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        df "$1" 2>/dev/null | awk 'NR==2 {print $NF}'
+    else
+        df --output=target "$1" 2>/dev/null | tail -1
+    fi
+}
+
+# Convert ISO8601 timestamp (YYYY-MM-DDTHH:MM:SSZ) to epoch seconds.
+iso_to_epoch() {
+    local iso="$1"
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null || echo 0
+    else
+        date -d "$iso" +%s 2>/dev/null || echo 0
+    fi
+}
+
+# OS-appropriate "thermal/system" entropy snapshot. Output is a hash-friendly
+# blob of changing kernel/system data — used as a salt component, not as
+# primary entropy. On Linux: thermal zones + lm-sensors. On macOS: sysctl
+# state + vm_stat + ioreg power/thermal nodes (all change frequently).
+system_thermal_entropy() {
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        {
+            sysctl -a 2>/dev/null | grep -E '(machdep\.cpu|hw\.|kern\.boottime|vm\.loadavg|hw\.cpufrequency)' || true
+            vm_stat 2>/dev/null || true
+            ioreg -l -w0 -c IOPMrootDomain 2>/dev/null | head -200 || true
+            ioreg -l -w0 -c AppleSmartBattery 2>/dev/null | head -100 || true
+        } | tr -d ' \n'
+    else
+        {
+            for tz in /sys/class/thermal/thermal_zone*/temp; do
+                [[ -f "$tz" ]] && cat "$tz"
+            done
+            sensors -u 2>/dev/null || true
+        } | tr -d ' \n'
+    fi
+}
+
+# =============================================================================
 # Logging
 # =============================================================================
 
@@ -40,9 +154,22 @@ require_openssl3() {
         log_err "openssl not found"
         exit 1
     fi
-    local ver
-    ver=$(openssl version | awk '{print $2}')
-    local major="${ver%%.*}"
+    local raw ver major flavor
+    raw=$(openssl version)
+    flavor=$(echo "$raw" | awk '{print $1}')
+    ver=$(echo "$raw" | awk '{print $2}')
+    major="${ver%%.*}"
+
+    # LibreSSL (Apple's /usr/bin/openssl) lacks the `kdf` subcommand entirely.
+    if [[ "$flavor" == "LibreSSL" ]]; then
+        log_err "LibreSSL detected ($raw) — 'openssl kdf' is unavailable."
+        if [[ "$_IS_MACOS" == "true" ]]; then
+            log_err "Install OpenSSL 3.x via Homebrew: brew install openssl@3"
+            log_err "(yubi-lib.sh prepends Homebrew paths automatically)"
+        fi
+        exit 1
+    fi
+
     if [[ "$major" -lt 3 ]]; then
         log_err "OpenSSL 3.0+ required (found: $ver) — 'openssl kdf' unavailable on 1.x"
         exit 1
@@ -101,7 +228,7 @@ secure_delete() {
     fi
 
     local filesize
-    filesize=$(stat -c%s "$file" 2>/dev/null || echo "0")
+    filesize=$(file_size "$file")
 
     # Pass 1-3: overwrite with random data
     for pass in 1 2 3; do
@@ -119,14 +246,15 @@ secure_delete() {
     # Resolve mount point BEFORE deleting (df fails on deleted paths)
     local mount_point=""
     if [[ $EUID -eq 0 ]]; then
-        mount_point=$(df --output=target "$file" 2>/dev/null | tail -1)
+        mount_point=$(df_target "$file")
     fi
 
     # Remove
     rm -f "$file"
 
-    # If we can fstrim (root), TRIM freed SSD blocks
-    if [[ $EUID -eq 0 && -n "$mount_point" ]]; then
+    # If we can fstrim (root, Linux only), TRIM freed SSD blocks.
+    # macOS APFS auto-TRIMs; no equivalent invocation needed.
+    if [[ $EUID -eq 0 && -n "$mount_point" ]] && command -v fstrim &>/dev/null; then
         fstrim "$mount_point" 2>/dev/null || true
     fi
 
@@ -168,7 +296,10 @@ secure_tmpfs_create() {
     SECURE_TMPFS_DIR=$(mktemp -d "/tmp/${label}.XXXXXX")
     chmod 700 "$SECURE_TMPFS_DIR"
 
-    if [[ $EUID -eq 0 ]]; then
+    # tmpfs mount is Linux-only. macOS has no tmpfs equivalent that we can
+    # mount without elevated privileges and a hdiutil-attached ramdisk; on
+    # both platforms we fall back to disk-backed + secure_delete on cleanup.
+    if [[ $EUID -eq 0 && "$_IS_MACOS" == "false" ]]; then
         if mount -t tmpfs -o size=${size_mb}m,mode=700 tmpfs "$SECURE_TMPFS_DIR" 2>/dev/null; then
             SECURE_TMPFS_MOUNTED=true
             log_ok "Secure workspace: tmpfs (RAM-backed, ${size_mb}MB)" >&2
@@ -344,7 +475,7 @@ validate_entropy_file() {
 
     # Check file permissions
     local perms
-    perms=$(stat -c '%a' "$file" 2>/dev/null)
+    perms=$(file_perms "$file")
     if [[ "$perms" != "600" ]]; then
         log_warn "Entropy file permissions are $perms (recommended: 600)"
     fi
@@ -555,7 +686,7 @@ report_entropy_file() {
     # Staleness check
     if [[ -n "$latest" ]]; then
         local latest_epoch
-        latest_epoch=$(date -d "$latest" +%s 2>/dev/null || echo 0)
+        latest_epoch=$(iso_to_epoch "$latest")
         local now_epoch
         now_epoch=$(date +%s)
         local age_days=$(( (now_epoch - latest_epoch) / 86400 ))

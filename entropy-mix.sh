@@ -83,20 +83,15 @@ log_info "Input: $INPUT_FILE ($LINE_COUNT passwords)"
 log_info "Output: $OUTPUT_FILE"
 
 # --- Prerequisite checks ---
-for cmd in openssl curl sensors; do
+for cmd in openssl curl; do
     if ! command -v "$cmd" &>/dev/null; then
         log_err "Required command not found: $cmd"
         exit 1
     fi
 done
 
-# Verify OpenSSL 3.x for HKDF support
-ossl_ver=$(openssl version | awk '{print $2}')
-ossl_major="${ossl_ver%%.*}"
-if [[ "$ossl_major" -lt 3 ]]; then
-    log_err "OpenSSL 3.0+ required (found: $ossl_ver) — 'openssl kdf' unavailable on 1.x"
-    exit 1
-fi
+# lm-sensors is Linux-only; system_thermal_entropy() handles both platforms.
+require_openssl3
 
 # --- Entropy collection functions ---
 
@@ -106,23 +101,24 @@ collect_cpu_random() {
 }
 
 collect_thermal_base() {
-    # Collect sensor snapshot once (expensive), store as base entropy
-    local data=""
-    for tz in /sys/class/thermal/thermal_zone*/temp; do
-        [[ -f "$tz" ]] && data+="$(cat "$tz")"
-    done
-    data+="$(sensors -u 2>/dev/null | tr -d ' \n')"
-    printf '%s' "$data" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
+    # Collect sensor snapshot once (expensive), store as base entropy.
+    # system_thermal_entropy() picks the right source per platform.
+    printf '%s' "$(system_thermal_entropy)" \
+        | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
 }
 
 collect_thermal_perline() {
-    # Fast per-line: re-read sysfs temps (cheap) + nanosecond timestamp + base
+    # Fast per-line: cheap sysfs/sysctl read + nanosecond timestamp + base.
     local base="$1"
     local data="$base"
-    for tz in /sys/class/thermal/thermal_zone*/temp; do
-        [[ -f "$tz" ]] && data+="$(cat "$tz")"
-    done
-    data+="$(date +%s%N)"
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        data+="$(sysctl -n vm.loadavg kern.boottime 2>/dev/null)"
+    else
+        for tz in /sys/class/thermal/thermal_zone*/temp; do
+            [[ -f "$tz" ]] && data+="$(cat "$tz")"
+        done
+    fi
+    data+="$(now_ns)"
     printf '%s' "$data" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
 }
 
@@ -131,9 +127,9 @@ collect_disk_jitter_base() {
     local data=""
     for i in {1..8}; do
         local t_start t_end
-        t_start=$(date +%s%N)
+        t_start=$(now_ns)
         dd if=/dev/urandom bs=512 count=1 of=/dev/null 2>/dev/null
-        t_end=$(date +%s%N)
+        t_end=$(now_ns)
         data+="$((t_end - t_start))"
     done
     printf '%s' "$data" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
@@ -143,10 +139,10 @@ collect_jitter_perline() {
     # Fast per-line: 2 quick timing samples + nanosecond timestamp + base
     local base="$1"
     local t_start t_end
-    t_start=$(date +%s%N)
+    t_start=$(now_ns)
     dd if=/dev/urandom bs=64 count=1 of=/dev/null 2>/dev/null
-    t_end=$(date +%s%N)
-    printf '%s:%s:%s' "$base" "$((t_end - t_start))" "$(date +%s%N)" \
+    t_end=$(now_ns)
+    printf '%s:%s:%s' "$base" "$((t_end - t_start))" "$(now_ns)" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
 }
 

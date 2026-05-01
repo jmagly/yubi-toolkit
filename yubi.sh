@@ -163,7 +163,11 @@ BANNER
 # --- Require ykman for key operations ---
 require_ykman() {
     if ! command -v ykman &>/dev/null; then
-        log_err "ykman not found — install with: sudo apt install yubikey-manager"
+        if [[ "$_IS_MACOS" == "true" ]]; then
+            log_err "ykman not found — install with: brew install ykman"
+        else
+            log_err "ykman not found — install with: sudo apt install yubikey-manager"
+        fi
         exit 1
     fi
 }
@@ -389,7 +393,7 @@ case "$CMD" in
             count=$(grep -c '.' "$f" 2>/dev/null || true)
             keys_possible=$(( count / 5 ))
             basename=$(basename "$f")
-            mod_time=$(stat -c '%y' "$f" 2>/dev/null | cut -d. -f1)
+            mod_time=$(file_mtime "$f")
 
             if [[ "$count" -ge 5 ]]; then
                 printf "  ${GRN}%-40s${RST}  %3d seeds  (%d keys)  %s\n" \

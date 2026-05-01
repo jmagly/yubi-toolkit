@@ -10,7 +10,7 @@
 #
 #   Local system:
 #     - CPU RDRAND (/dev/urandom)
-#     - Thermal sensors (sysfs + lm-sensors)
+#     - Thermal sensors (Linux: sysfs + lm-sensors; macOS: sysctl + ioreg)
 #     - Disk I/O timing jitter
 #
 #   External APIs (retry + degrade):
@@ -25,7 +25,8 @@
 #   output_file: where to write seeds
 #   count:       number of seeds to generate (default: 15, range: 10-20)
 #
-# Requires: openssl, curl, sensors, python3 (for mouse capture)
+# Requires: openssl 3.x, curl, python3 (for mouse capture)
+# Optional: lm-sensors (Linux only — extra thermal entropy)
 
 set -euo pipefail
 umask 077       # New files owner-only
@@ -165,20 +166,21 @@ fi
 # Prerequisites
 # =============================================================================
 
-for cmd in openssl curl sensors python3; do
+for cmd in openssl curl python3; do
     if ! command -v "$cmd" &>/dev/null; then
         log_err "Required command not found: $cmd"
         exit 1
     fi
 done
 
-# Verify OpenSSL 3.x for HKDF support
-ossl_ver=$(openssl version | awk '{print $2}')
-ossl_major="${ossl_ver%%.*}"
-if [[ "$ossl_major" -lt 3 ]]; then
-    log_err "OpenSSL 3.0+ required (found: $ossl_ver) — 'openssl kdf' unavailable on 1.x"
-    exit 1
+# lm-sensors is Linux-only; skip silently on macOS (system_thermal_entropy
+# uses sysctl/vm_stat/ioreg there).
+if [[ "$_IS_MACOS" == "false" ]] && ! command -v sensors &>/dev/null; then
+    log_warn "lm-sensors not found — thermal entropy will use sysfs only"
 fi
+
+# Require OpenSSL 3.x (LibreSSL on macOS lacks `openssl kdf`)
+require_openssl3
 
 # Check X11 mouse capture availability
 MOUSE_AVAILABLE=false
@@ -299,7 +301,7 @@ finally:
     if [[ -z "$data_line" || "$data_line" != *"|"* ]]; then
         log_warn "Round $round_num: incomplete capture, using what we got"
         # Still hash whatever we got
-        printf '%s:%s' "$result" "$(date +%s%N)" \
+        printf '%s:%s' "$result" "$(now_ns)" \
             | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
         return
     fi
@@ -318,7 +320,7 @@ finally:
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Combine with timestamp
-    printf '%s:%s:%s' "$timing_hash" "$char_hash" "$(date +%s%N)" \
+    printf '%s:%s:%s' "$timing_hash" "$char_hash" "$(now_ns)" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
 }
 
@@ -400,13 +402,8 @@ fi
 
 log_step "Phase 2: System Entropy"
 
-log_info "Collecting thermal sensor data..."
-THERMAL_ENTROPY=""
-for tz in /sys/class/thermal/thermal_zone*/temp; do
-    [[ -f "$tz" ]] && THERMAL_ENTROPY+="$(cat "$tz")"
-done
-THERMAL_ENTROPY+="$(sensors -u 2>/dev/null | tr -d ' \n')"
-THERMAL_ENTROPY+="$(date +%s%N)"
+log_info "Collecting thermal/system sensor data..."
+THERMAL_ENTROPY="$(system_thermal_entropy)$(now_ns)"
 THERMAL_ENTROPY=$(printf '%s' "$THERMAL_ENTROPY" \
     | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 log_ok "Thermal entropy collected"
@@ -414,9 +411,9 @@ log_ok "Thermal entropy collected"
 log_info "Collecting disk I/O timing jitter..."
 JITTER_ENTROPY=""
 for j in {1..16}; do
-    t_start=$(date +%s%N)
+    t_start=$(now_ns)
     dd if=/dev/urandom bs=512 count=1 of=/dev/null 2>/dev/null
-    t_end=$(date +%s%N)
+    t_end=$(now_ns)
     JITTER_ENTROPY+="$((t_end - t_start))"
 done
 JITTER_ENTROPY=$(printf '%s' "$JITTER_ENTROPY" \
@@ -456,20 +453,24 @@ for (( s=0; s<SEED_COUNT; s++ )); do
     # Fresh CPU entropy per seed
     cpu_ent=$(openssl rand -hex 32)
 
-    # Fresh thermal snapshot (fast — sysfs only)
-    fresh_thermal=""
-    for tz in /sys/class/thermal/thermal_zone*/temp; do
-        [[ -f "$tz" ]] && fresh_thermal+="$(cat "$tz")"
-    done
-    fresh_thermal+="$(date +%s%N)"
+    # Fresh thermal snapshot per seed (cheap — sysfs/sysctl only, no lm-sensors)
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        fresh_thermal=$(sysctl -n vm.loadavg kern.boottime hw.ncpu 2>/dev/null)
+    else
+        fresh_thermal=""
+        for tz in /sys/class/thermal/thermal_zone*/temp; do
+            [[ -f "$tz" ]] && fresh_thermal+="$(cat "$tz")"
+        done
+    fi
+    fresh_thermal+="$(now_ns)"
     fresh_thermal=$(printf '%s' "$fresh_thermal" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Fresh jitter sample
-    t_s=$(date +%s%N)
+    t_s=$(now_ns)
     dd if=/dev/urandom bs=64 count=1 of=/dev/null 2>/dev/null
-    t_e=$(date +%s%N)
-    fresh_jitter=$(printf '%s:%s' "$((t_e - t_s))" "$(date +%s%N)" \
+    t_e=$(now_ns)
+    fresh_jitter=$(printf '%s:%s' "$((t_e - t_s))" "$(now_ns)" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Per-seed external entropy slices (unique via seed index + random nonce)
@@ -482,7 +483,7 @@ for (( s=0; s<SEED_COUNT; s++ )); do
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Build IKM from interactive entropy (the user's unique contribution)
-    ikm_raw="${KEY_ENTROPY}:${MOUSE_ENTROPY}:seed${s}:$(date +%s%N)"
+    ikm_raw="${KEY_ENTROPY}:${MOUSE_ENTROPY}:seed${s}:$(now_ns)"
 
     # Mix in a randomly selected line from extra data file (if provided)
     if [[ ${#EXTRA_POOL[@]} -gt 0 ]]; then

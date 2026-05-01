@@ -77,7 +77,11 @@ fi
 # =============================================================================
 
 if ! command -v ykman &>/dev/null; then
-    log_err "ykman not found — install with: sudo apt install yubikey-manager"
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        log_err "ykman not found — install with: brew install ykman"
+    else
+        log_err "ykman not found — install with: sudo apt install yubikey-manager"
+    fi
     exit 1
 fi
 
@@ -271,28 +275,30 @@ case "$MODE" in
 esac
 
 # --- OTP Slot 1 ---
-declare -A slot_desc
+# Use scalar variables instead of `declare -A` for bash 3.2 compat (macOS).
+slot1_desc=""
+slot2_desc=""
 if [[ "$slot1_mode" == "otp" ]]; then
     s1_aes=$(hkdf_derive_hex "$raw_slot1" "yubiotp-aes-key-slot1" "$OTP_AES_KEY_LEN")
     s1_pid=$(hkdf_derive_hex "$raw_slot1" "yubiotp-private-id-slot1" "$OTP_PRIVATE_ID_LEN")
-    slot_desc[1]="Yubico OTP  AES ${s1_aes:0:8}...${s1_aes: -4}  pid ${s1_pid}"
+    slot1_desc="Yubico OTP  AES ${s1_aes:0:8}...${s1_aes: -4}  pid ${s1_pid}"
 else
     s1_pw="${raw_slot1:0:$MAX_STATIC_LEN}"
     [[ ${#raw_slot1} -gt $MAX_STATIC_LEN ]] && \
         log_warn "Slot 1: truncated from ${#raw_slot1} to $MAX_STATIC_LEN chars"
-    slot_desc[1]="static password (US layout, ${#s1_pw} chars)"
+    slot1_desc="static password (US layout, ${#s1_pw} chars)"
 fi
 
 # --- OTP Slot 2 ---
 if [[ "$slot2_mode" == "otp" ]]; then
     s2_aes=$(hkdf_derive_hex "$raw_slot2" "yubiotp-aes-key-slot2" "$OTP_AES_KEY_LEN")
     s2_pid=$(hkdf_derive_hex "$raw_slot2" "yubiotp-private-id-slot2" "$OTP_PRIVATE_ID_LEN")
-    slot_desc[2]="Yubico OTP  AES ${s2_aes:0:8}...${s2_aes: -4}  pid ${s2_pid}"
+    slot2_desc="Yubico OTP  AES ${s2_aes:0:8}...${s2_aes: -4}  pid ${s2_pid}"
 else
     s2_pw="${raw_slot2:0:$MAX_STATIC_LEN}"
     [[ ${#raw_slot2} -gt $MAX_STATIC_LEN ]] && \
         log_warn "Slot 2: truncated from ${#raw_slot2} to $MAX_STATIC_LEN chars"
-    slot_desc[2]="static password (US layout, ${#s2_pw} chars)"
+    slot2_desc="static password (US layout, ${#s2_pw} chars)"
 fi
 
 # =============================================================================
@@ -302,8 +308,8 @@ fi
 echo ""
 log_info "=== CONFIGURATION PLAN ==="
 log_info "Target:      YubiKey $SERIAL"
-log_info "OTP Slot 1:  ${slot_desc[1]}"
-log_info "OTP Slot 2:  ${slot_desc[2]}"
+log_info "OTP Slot 1:  ${slot1_desc}"
+log_info "OTP Slot 2:  ${slot2_desc}"
 log_info "PIV PIN:     ${derived_pin:0:2}******  (8 numeric digits)"
 log_info "PIV PUK:     ${derived_puk:0:2}******  (8 alphanumeric chars)"
 log_info "PIV Mgmt:    ${derived_mgmt:0:8}...${derived_mgmt: -4}  (${PIV_MGMT_KEY_LEN}-byte $MGMT_KEY_ALGO)"
@@ -521,8 +527,8 @@ echo ""
 log_ok "============================================"
 log_ok " YubiKey $SERIAL — fully initialized"
 log_ok "============================================"
-log_ok "OTP Slot 1:  ${slot_desc[1]}"
-log_ok "OTP Slot 2:  ${slot_desc[2]}"
+log_ok "OTP Slot 1:  ${slot1_desc}"
+log_ok "OTP Slot 2:  ${slot2_desc}"
 log_ok "PIV Mgmt:    $derived_mgmt  ($MGMT_KEY_ALGO)"
 log_ok "PIV PUK:     $derived_puk"
 log_ok "FIDO2 PIN:   (same as PIV PIN)"

@@ -14,7 +14,8 @@
 #   MODE:   "otp", "static", or "mixed"
 #   SERIAL: target YubiKey serial number
 #
-# Requires: ykman, openssl, curl, sensors
+# Requires: ykman, openssl 3.x, curl
+# Optional: lm-sensors (Linux only)
 
 set -euo pipefail
 
@@ -218,7 +219,7 @@ finally:
 
     if [[ -z "$data_line" || "$data_line" != *"|"* ]]; then
         log_warn "Round $round_num: incomplete capture, using what we got"
-        printf '%s:%s' "$result" "$(date +%s%N)" \
+        printf '%s:%s' "$result" "$(now_ns)" \
             | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
         return
     fi
@@ -233,7 +234,7 @@ finally:
     char_hash=$(printf '%s' "$chars" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
-    printf '%s:%s:%s' "$timing_hash" "$char_hash" "$(date +%s%N)" \
+    printf '%s:%s:%s' "$timing_hash" "$char_hash" "$(now_ns)" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
 }
 
@@ -411,18 +412,14 @@ drand_raw="$EXT_DRAND"
 # --- Local entropy baselines ---
 log_info "Collecting local sensor baselines..."
 
-thermal_base=""
-for tz in /sys/class/thermal/thermal_zone*/temp; do
-    [[ -f "$tz" ]] && thermal_base+="$(cat "$tz")"
-done
-thermal_base+="$(sensors -u 2>/dev/null | tr -d ' \n')"
+thermal_base=$(system_thermal_entropy)
 thermal_base=$(printf '%s' "$thermal_base" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
 jitter_base=""
 for j in {1..8}; do
-    t_start=$(date +%s%N)
+    t_start=$(now_ns)
     dd if=/dev/urandom bs=512 count=1 of=/dev/null 2>/dev/null
-    t_end=$(date +%s%N)
+    t_end=$(now_ns)
     jitter_base+="$((t_end - t_start))"
 done
 jitter_base=$(printf '%s' "$jitter_base" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
@@ -440,20 +437,24 @@ enrich_seed() {
     local cpu_ent
     cpu_ent=$(openssl rand -hex 32)
 
-    # Fresh thermal read + timestamp
+    # Fresh thermal read + timestamp (cheap per-seed snapshot)
     local thermal_ent=""
-    for tz in /sys/class/thermal/thermal_zone*/temp; do
-        [[ -f "$tz" ]] && thermal_ent+="$(cat "$tz")"
-    done
-    thermal_ent+="$(date +%s%N)${thermal_base}"
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        thermal_ent="$(sysctl -n vm.loadavg kern.boottime 2>/dev/null)"
+    else
+        for tz in /sys/class/thermal/thermal_zone*/temp; do
+            [[ -f "$tz" ]] && thermal_ent+="$(cat "$tz")"
+        done
+    fi
+    thermal_ent+="$(now_ns)${thermal_base}"
     thermal_ent=$(printf '%s' "$thermal_ent" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Fresh jitter sample + timestamp
     local t_s t_e jitter_ent
-    t_s=$(date +%s%N)
+    t_s=$(now_ns)
     dd if=/dev/urandom bs=64 count=1 of=/dev/null 2>/dev/null
-    t_e=$(date +%s%N)
-    jitter_ent=$(printf '%s:%s:%s' "$jitter_base" "$((t_e - t_s))" "$(date +%s%N)" \
+    t_e=$(now_ns)
+    jitter_ent=$(printf '%s:%s:%s' "$jitter_base" "$((t_e - t_s))" "$(now_ns)" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Per-seed external entropy slices
