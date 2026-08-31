@@ -314,7 +314,7 @@ case "$CMD" in
     init)
         require_ykman
         if [[ $# -lt 1 ]]; then
-            log_err "Usage: yubi.sh init <mode> [serial] [--no-external|--entropy-file PATH]"
+            log_err "Usage: yubi.sh init <mode> [serial] [--no-external|--entropy-file PATH|--allow-disk-workspace]"
             exit 1
         fi
         mode="$1"; shift
@@ -324,6 +324,7 @@ case "$CMD" in
             case "$1" in
                 --no-external)  passthrough_args+=(--no-external); shift ;;
                 --entropy-file) passthrough_args+=(--entropy-file "$2"); shift 2 ;;
+                --allow-disk-workspace) passthrough_args+=(--allow-disk-workspace); shift ;;
                 *)
                     if [[ -z "$serial" ]]; then
                         serial="$1"

@@ -97,7 +97,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 
 - **No `lm-sensors` needed** -- the toolkit collects equivalent system entropy from `sysctl`, `vm_stat`, and `ioreg` automatically.
 - **No X11 mouse capture** -- macOS uses Quartz, not X11. The toolkit automatically falls back to an extra keyboard entropy round, which provides strong entropy via nanosecond keystroke timing.
-- **No `tmpfs`** -- the `init` command's secure RAM workspace falls back to a disk-backed directory that is securely overwritten on cleanup. APFS encrypts data at rest, so the security gap is small.
+- **No native `tmpfs`** -- `init` fails closed on macOS unless you explicitly pass `--allow-disk-workspace`. That override permits plaintext temporary files on persistent storage; deletion cannot guarantee sanitization of APFS snapshots, journals, or flash blocks.
 - **Apple's bash 3.2 works** -- you do not need to `brew install bash`. The toolkit avoids bash 4-only features.
 
 ## Commands
@@ -256,7 +256,7 @@ When combining passwords from 2 YubiKeys:
 
 Sensitive files are handled with defense-in-depth:
 
-- **RAM workspace** (`tmpfs`): `init` mode keeps all working files in RAM -- never touches disk (Linux, root only). On macOS and unprivileged Linux, falls back to a disk-backed directory that is securely overwritten on cleanup.
+- **Volatile workspace** (`tmpfs`): `init` uses a verified Linux tmpfs, including `/dev/shm` for unprivileged users. tmpfs pages can be swapped; disable or encrypt swap when the threat model forbids disk exposure. Persistent fallback requires the explicit `--allow-disk-workspace` risk override.
 - **Disk files**: 3-pass random overwrite + zero pass + `sync` + unlink + `fstrim` (SSD, Linux root). On macOS, APFS auto-TRIMs and encrypts at rest, so `fstrim` is a no-op.
 - **Consumed seeds**: Removed from pool file atomically after successful programming
 - **Empty pool files**: Auto-detected and securely wiped by `purge`

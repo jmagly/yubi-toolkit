@@ -39,6 +39,8 @@ Usage: init-yubi.sh <MODE> <SERIAL> [options]
 Options:
   --entropy-file PATH   Use pre-collected entropy file instead of live APIs
   --no-external         Skip external API calls (local entropy only)
+  --allow-disk-workspace
+                        Permit plaintext temporary files on persistent storage
 
 You will be prompted to tap 2 source YubiKeys for entropy input.
 USAGE
@@ -50,12 +52,14 @@ SERIAL="$1"; shift
 LINES_REQUIRED=5
 NO_EXTERNAL=false
 ENTROPY_FILE_PATH=""
+ALLOW_DISK_WORKSPACE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-external) NO_EXTERNAL=true; shift ;;
         --entropy-file) ENTROPY_FILE_PATH="$2"; shift 2 ;;
-        *) shift ;;
+        --allow-disk-workspace) ALLOW_DISK_WORKSPACE=true; shift ;;
+        *) log_err "Unknown option: $1"; exit 1 ;;
     esac
 done
 
@@ -71,8 +75,22 @@ for script in yubi-mux.sh entropy-mix.sh configure-yubi.sh; do
 done
 
 # --- Secure working directory ---
-WORKDIR=$(secure_tmpfs_create "init-yubi")
-trap secure_tmpfs_cleanup EXIT
+# Install cleanup before allocation so every successful allocation is owned by
+# the parent shell. Command substitution must not be used here: it would lose
+# the lifecycle globals in a subshell.
+cleanup_init_workspace() {
+    local status=$?
+    trap - EXIT
+    secure_tmpfs_cleanup || true
+    exit "$status"
+}
+trap cleanup_init_workspace EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+secure_tmpfs_create "init-yubi" 16 "$ALLOW_DISK_WORKSPACE"
+WORKDIR="$SECURE_TMPFS_DIR"
 
 MUX_FILE="$WORKDIR/muxed.txt"
 ENRICHED_FILE="$WORKDIR/enriched.txt"

@@ -279,58 +279,118 @@ secure_delete_dir() {
 }
 
 # =============================================================================
-# Secure tmpfs workspace (RAM-backed, never hits disk)
+# Secure volatile workspace
 # =============================================================================
 #
-# Creates a tmpfs mount for sensitive working files.
-# Falls back to regular tmpdir if not root (can't mount).
-# Either way, secure_delete is used on cleanup.
+# Uses an existing Linux tmpfs when available, or mounts a private tmpfs when
+# running as root. A persistent fallback is forbidden unless the caller passes
+# an explicit opt-in. tmpfs pages can be swapped; operators that require a
+# no-write-to-disk guarantee must also disable or encrypt swap.
 
 SECURE_TMPFS_DIR=""
 SECURE_TMPFS_MOUNTED=false
+SECURE_TMPFS_KIND=""
+
+path_filesystem_type() {
+    local path="$1"
+    if [[ "$_IS_MACOS" == "true" ]]; then
+        stat -f '%T' "$path" 2>/dev/null
+    elif command -v findmnt >/dev/null 2>&1; then
+        findmnt -n -o FSTYPE --target "$path" 2>/dev/null
+    else
+        stat -f -c '%T' "$path" 2>/dev/null
+    fi
+}
+
+path_is_tmpfs() {
+    [[ "$(path_filesystem_type "$1")" == "tmpfs" ]]
+}
 
 secure_tmpfs_create() {
     local label="${1:-yubi-work}"
     local size_mb="${2:-16}"
+    local allow_disk="${3:-false}"
+    local candidate=""
 
-    SECURE_TMPFS_DIR=$(mktemp -d "/tmp/${label}.XXXXXX")
-    chmod 700 "$SECURE_TMPFS_DIR"
+    SECURE_TMPFS_DIR=""
+    SECURE_TMPFS_MOUNTED=false
+    SECURE_TMPFS_KIND=""
 
-    # tmpfs mount is Linux-only. macOS has no tmpfs equivalent that we can
-    # mount without elevated privileges and a hdiutil-attached ramdisk; on
-    # both platforms we fall back to disk-backed + secure_delete on cleanup.
-    if [[ $EUID -eq 0 && "$_IS_MACOS" == "false" ]]; then
-        if mount -t tmpfs -o size=${size_mb}m,mode=700 tmpfs "$SECURE_TMPFS_DIR" 2>/dev/null; then
+    if [[ "$_IS_MACOS" == "false" ]]; then
+        for candidate in "${XDG_RUNTIME_DIR:-}" /dev/shm /tmp; do
+            [[ -n "$candidate" && -d "$candidate" && -w "$candidate" ]] || continue
+            if path_is_tmpfs "$candidate"; then
+                SECURE_TMPFS_DIR=$(mktemp -d "${candidate%/}/${label}.XXXXXX") || return 1
+                chmod 700 "$SECURE_TMPFS_DIR"
+                SECURE_TMPFS_KIND="existing-tmpfs"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$SECURE_TMPFS_DIR" && $EUID -eq 0 && "$_IS_MACOS" == "false" ]]; then
+        SECURE_TMPFS_DIR=$(mktemp -d "/tmp/${label}.XXXXXX") || return 1
+        chmod 700 "$SECURE_TMPFS_DIR"
+        if mount -t tmpfs -o "size=${size_mb}m,mode=700" tmpfs "$SECURE_TMPFS_DIR" 2>/dev/null && \
+           path_is_tmpfs "$SECURE_TMPFS_DIR"; then
             SECURE_TMPFS_MOUNTED=true
-            log_ok "Secure workspace: tmpfs (RAM-backed, ${size_mb}MB)" >&2
+            SECURE_TMPFS_KIND="private-tmpfs"
+        else
+            umount "$SECURE_TMPFS_DIR" 2>/dev/null || true
+            rmdir "$SECURE_TMPFS_DIR" 2>/dev/null || true
+            SECURE_TMPFS_DIR=""
         fi
     fi
 
-    if [[ "$SECURE_TMPFS_MOUNTED" == "false" ]]; then
-        log_info "Secure workspace: $SECURE_TMPFS_DIR (disk-backed, will secure-delete)" >&2
+    if [[ -z "$SECURE_TMPFS_DIR" ]]; then
+        if [[ "$allow_disk" != "true" ]]; then
+            log_err "No verified tmpfs is available; refusing persistent secret workspace"
+            log_err "Use --allow-disk-workspace only after reviewing the storage risk"
+            return 1
+        fi
+        SECURE_TMPFS_DIR=$(mktemp -d "/tmp/${label}.XXXXXX") || return 1
+        chmod 700 "$SECURE_TMPFS_DIR"
+        SECURE_TMPFS_KIND="persistent-override"
+        log_warn "Persistent workspace override enabled: $SECURE_TMPFS_DIR" >&2
+        log_warn "Deletion cannot guarantee sanitization of flash, journals, or snapshots" >&2
+    else
+        log_ok "Secure workspace: verified tmpfs ($SECURE_TMPFS_KIND, ${size_mb}MB limit when privately mounted)" >&2
     fi
 
-    echo "$SECURE_TMPFS_DIR"
+    : > "$SECURE_TMPFS_DIR/.yubi-secure-workspace"
+    chmod 600 "$SECURE_TMPFS_DIR/.yubi-secure-workspace"
+    return 0
 }
 
 secure_tmpfs_cleanup() {
     if [[ -z "$SECURE_TMPFS_DIR" || ! -d "$SECURE_TMPFS_DIR" ]]; then
+        SECURE_TMPFS_DIR=""
+        SECURE_TMPFS_MOUNTED=false
+        SECURE_TMPFS_KIND=""
         return 0
+    fi
+
+    if [[ ! -f "$SECURE_TMPFS_DIR/.yubi-secure-workspace" ]]; then
+        log_err "Refusing to clean unmarked workspace: $SECURE_TMPFS_DIR"
+        return 1
     fi
 
     if [[ "$SECURE_TMPFS_MOUNTED" == "true" ]]; then
         # tmpfs: just unmount — RAM is gone
-        umount "$SECURE_TMPFS_DIR" 2>/dev/null
-        rmdir "$SECURE_TMPFS_DIR" 2>/dev/null
+        rm -f "$SECURE_TMPFS_DIR/.yubi-secure-workspace"
+        umount "$SECURE_TMPFS_DIR" 2>/dev/null || return 1
+        rmdir "$SECURE_TMPFS_DIR" 2>/dev/null || return 1
         log_ok "Secure workspace unmounted (RAM released)"
     else
-        # Disk-backed: secure delete everything
+        # Existing tmpfs needs only removal. Persistent override gets the
+        # legacy best-effort clear until encrypted pools replace it.
         secure_delete_dir "$SECURE_TMPFS_DIR" false
-        log_ok "Secure workspace wiped and removed"
+        log_ok "Secure workspace cleared and removed"
     fi
 
     SECURE_TMPFS_DIR=""
     SECURE_TMPFS_MOUNTED=false
+    SECURE_TMPFS_KIND=""
 }
 
 # =============================================================================
