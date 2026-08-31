@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # entropy-mix.sh — Mix YubiKey RNG passwords with multiple entropy sources
 # Uses HKDF-SHA512 to combine: YubiKey + CPU RNG + thermal sensors +
-# disk timing jitter + random.org + NIST Beacon + drand beacon
+# mandatory CSPRNG output plus unassessed local supplements
 #
 # Usage: ./entropy-mix.sh <input_file> [output_file]
 #   input_file:  text file with one YubiKey password per line
@@ -27,8 +27,8 @@ Usage: entropy-mix.sh <input_file> [output_file] [options]
   output_file: defaults to <input_file>.mixed
 
 Options:
-  --no-external         Skip external API calls (local entropy only)
-  --entropy-file PATH   Use pre-collected entropy file instead of live APIs
+  --no-external         Compatibility no-op; networking is disabled
+  --entropy-file PATH   Rejected legacy unverified input
 USAGE
     exit 1
 fi
@@ -83,7 +83,7 @@ log_info "Input: $INPUT_FILE ($LINE_COUNT passwords)"
 log_info "Output: $OUTPUT_FILE"
 
 # --- Prerequisite checks ---
-for cmd in openssl curl; do
+for cmd in openssl; do
     if ! command -v "$cmd" &>/dev/null; then
         log_err "Required command not found: $cmd"
         exit 1
@@ -92,12 +92,17 @@ done
 
 # lm-sensors is Linux-only; system_thermal_entropy() handles both platforms.
 require_openssl3
+require_csprng
+if [[ -n "$ENTROPY_FILE_PATH" ]]; then
+    log_err "Legacy external entropy files cannot be mixed; verified beacon support was removed"
+    exit 1
+fi
+NO_EXTERNAL=true
 
 # --- Entropy collection functions ---
 
 collect_cpu_random() {
-    # 32 bytes from /dev/urandom via openssl (uses CPU RDRAND when available)
-    openssl rand -hex 32
+    csprng_hex 32
 }
 
 collect_thermal_base() {
@@ -150,68 +155,8 @@ collect_jitter_perline() {
 # get_external_entropy). The batch collection functions below use the
 # shared call_external() with retry+degrade.
 
-collect_random_org_batch() {
-    local count=$1
-    log_info "random.org: requesting $count values..."
-    local url="https://www.random.org/integers/?num=${count}&min=0&max=1000000000&col=1&base=10&format=plain&rnd=new"
-    local raw
-    raw=$(call_external "random.org" "$url") || { echo ""; return 1; }
-    printf '%s' "$raw" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
-    RANDOM_ORG_RAW="$raw"
-    return 0
-}
-
-collect_nist_beacon_batch() {
-    local count=$1
-    log_info "NIST Beacon: requesting $count pulses..."
-    local data=""
-    local calls=$count
-    (( calls > 3 )) && calls=3
-
-    for (( i=0; i<calls; i++ )); do
-        local raw
-        raw=$(call_external "NIST Beacon" \
-            "https://beacon.nist.gov/beacon/2.0/pulse/last") || continue
-        data+="$raw"
-        sleep 0.3
-    done
-
-    if [[ -z "$data" ]]; then
-        NIST_BEACON_RAW=""
-        echo ""
-        return 1
-    fi
-    NIST_BEACON_RAW="$data"
-    printf '%s' "$data" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
-    return 0
-}
-
-collect_drand_batch() {
-    local count=$1
-    log_info "drand: requesting $count beacon rounds..."
-    local data=""
-    local calls=$(( (count + API_BATCH_SIZE - 1) / API_BATCH_SIZE ))
-    (( calls < 1 )) && calls=1
-    (( calls > 3 )) && calls=3
-
-    for (( i=0; i<calls; i++ )); do
-        local raw
-        raw=$(call_external "drand" \
-            "https://drand.cloudflare.com/public/latest") || continue
-        data+="$raw"
-        sleep 0.5
-    done
-
-    if [[ -z "$data" ]]; then
-        DRAND_RAW=""
-        echo ""
-        return 1
-    fi
-    DRAND_RAW="$data"
-    printf '%s' "$data" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
-    return 0
-}
-
+# Live public-beacon collectors were removed. Public inputs are not mixed
+# without signature, chain, freshness, replay, schema, and size verification.
 # --- Per-line entropy distributor ---
 # Given a raw data blob from an API batch, pick a portion for this line index
 # using CPU random to select which chunk maps to which line
@@ -242,12 +187,12 @@ hkdf_mix() {
     local ext3_entropy="$7"  # drand
 
     # Build salt from all non-YubiKey entropy (hex concatenation)
-    local salt_hex="${cpu_entropy}${thermal_entropy}${jitter_entropy}"
+    local salt_hex="${thermal_entropy}${jitter_entropy}"
     salt_hex+="${ext1_entropy}${ext2_entropy}${ext3_entropy}"
 
-    # IKM is the YubiKey password
+    # The CSPRNG is mandatory secret IKM; the password is a supplement.
     local ikm_hex
-    ikm_hex=$(printf '%s' "$yubikey_pw" | xxd -p | tr -d '\n')
+    ikm_hex=$(printf '%s:%s' "$cpu_entropy" "$yubikey_pw" | xxd -p | tr -d '\n')
 
     # Info field identifies this derivation context
     local info_hex
@@ -264,68 +209,13 @@ hkdf_mix() {
 }
 
 # --- Main execution ---
-
-log_info "=== Collecting batch external entropy ==="
-
+# Public diversification is disabled. These empty values preserve the v1
+# function framing without treating public data as secret input.
 RANDOM_ORG_RAW=""
 NIST_BEACON_RAW=""
 DRAND_RAW=""
-
-# Track which external sources succeeded
 ext_sources_ok=0
-ext_sources_failed=()
-
-if [[ "$NO_EXTERNAL" == "true" ]]; then
-    log_info "External entropy: disabled (--no-external)"
-elif [[ -n "$ENTROPY_FILE_PATH" ]]; then
-    # Load from pre-collected entropy file
-    log_info "Loading external entropy from file: $ENTROPY_FILE_PATH"
-    load_external_entropy "$ENTROPY_FILE_PATH"
-    ext_sources_ok="$EXT_SOURCES_OK"
-    # Map to the RAW variables used by pick_entropy_for_line
-    RANDOM_ORG_RAW="$EXT_RANDOM_ORG"
-    NIST_BEACON_RAW="$EXT_NIST"
-    DRAND_RAW="$EXT_DRAND"
-else
-    # Live API fetch (original behavior)
-    api_calls=$(( (LINE_COUNT + API_BATCH_SIZE - 1) / API_BATCH_SIZE ))
-    (( api_calls < 1 )) && api_calls=1
-    (( api_calls > 3 )) && api_calls=3
-    batch_size=$(( (LINE_COUNT + api_calls - 1) / api_calls ))
-
-    if collect_random_org_batch "$batch_size"; then
-        log_ok "random.org: collected"
-        ext_sources_ok=$(( ext_sources_ok + 1 ))
-    else
-        ext_sources_failed+=("random.org")
-    fi
-
-    if collect_nist_beacon_batch "$batch_size"; then
-        log_ok "NIST Beacon: collected"
-        ext_sources_ok=$(( ext_sources_ok + 1 ))
-    else
-        ext_sources_failed+=("NIST Beacon")
-    fi
-
-    if collect_drand_batch "$api_calls"; then
-        log_ok "drand: collected"
-        ext_sources_ok=$(( ext_sources_ok + 1 ))
-    else
-        ext_sources_failed+=("drand")
-    fi
-
-    if [[ ${#ext_sources_failed[@]} -gt 0 ]]; then
-        log_warn "Failed external sources: ${ext_sources_failed[*]}"
-    fi
-fi
-
-log_info "External sources available: $ext_sources_ok/3"
-
-if (( ext_sources_ok == 0 )) && [[ "$NO_EXTERNAL" == "false" ]]; then
-    log_warn "NO external sources available — output relies on local entropy only"
-    log_warn "Consider re-running when network is available for stronger mixing"
-fi
-
+log_info "Public diversification: disabled (unverified beacon paths removed)"
 log_info "=== Collecting local sensor baselines ==="
 THERMAL_BASE=$(collect_thermal_base)
 log_ok "Thermal baseline collected"
@@ -347,7 +237,7 @@ while IFS= read -r yubikey_pw || [[ -n "$yubikey_pw" ]]; do
     fi
 
     # Fresh local entropy per line (fast variants using cached base)
-    cpu_ent=$(collect_cpu_random)
+    cpu_ent=$(collect_cpu_random) || { log_err "CSPRNG failed during mixing"; exit 1; }
     thermal_ent=$(collect_thermal_perline "$THERMAL_BASE")
     jitter_ent=$(collect_jitter_perline "$JITTER_BASE")
 
@@ -389,16 +279,9 @@ log_info "Password length: $((first_len - 1)) chars (base64 of ${HKDF_KEYLEN} by
 
 # Entropy source summary
 log_info "=== Entropy Source Report ==="
-log_ok "CPU RDRAND:     ✓ (fresh per line)"
-log_ok "Thermal:        ✓ (fresh per line)"
-log_ok "Disk jitter:    ✓ (fresh per line)"
-for src in "random.org" "NIST Beacon" "drand"; do
-    if printf '%s\n' "${ext_sources_failed[@]}" | grep -q "$src" 2>/dev/null; then
-        log_warn "$src:  ✗ DEGRADED"
-    else
-        log_ok "$src:  ✓ (batch, randomly distributed)"
-    fi
-done
+log_ok "Platform CSPRNG: ✓ (mandatory fresh secret root per line)"
+log_info "Thermal/timing: unassessed supplements (no min-entropy claim)"
+log_info "Public beacons: disabled (unverified paths removed)"
 
 log_ok "Output written to: $OUTPUT_FILE (mode 600)"
 log_info "Done."

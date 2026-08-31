@@ -5,7 +5,7 @@
 #   bootstrap        [count] [file|--mux] [--no-external|--entropy-file PATH]
 #   mux                              Pair passwords from 2 existing YubiKeys
 #   enrich           [file] [--no-external|--entropy-file PATH]
-#   entropy-collect  [file] [--append] [--sources LIST] [--quiet]
+#   entropy-collect                   Removed; unverified public inputs rejected
 #   entropy-verify   <file>          Validate a collected entropy file
 #   configure   <mode> [serial]      Program a YubiKey from seed pool
 #   init        <mode> [serial] [--no-external|--entropy-file PATH]
@@ -149,7 +149,7 @@ BANNER
     printf "  ${GRN}enrich${RST}           [file]                Enrich latest seed file with external entropy\n"
     echo ""
     printf "${BLD}Entropy Collection (air-gapped workflows):${RST}\n"
-    printf "  ${GRN}entropy-collect${RST}  [file] [--append]     Collect external entropy to portable file\n"
+    printf "  ${DIM}entropy-collect${RST}                         Removed (unverified beacon inputs)\n"
     printf "  ${GRN}entropy-verify${RST}   <file>                Validate a collected entropy file\n"
     echo ""
     printf "${BLD}Key Programming:${RST}\n"
@@ -167,8 +167,8 @@ BANNER
     printf "${BLD}Modes:${RST}  otp | static | mixed\n"
     echo ""
     printf "${BLD}Flags${RST} (for bootstrap, enrich, init):\n"
-    printf "  ${DIM}--no-external${RST}         Skip external API calls (local entropy only)\n"
-    printf "  ${DIM}--entropy-file PATH${RST}   Use pre-collected entropy instead of live APIs\n"
+    printf "  ${DIM}--no-external${RST}         Compatibility no-op; networking is disabled\n"
+    printf "  ${DIM}--entropy-file PATH${RST}   Rejected legacy unverified input\n"
     printf "  ${DIM}--image-dir PATH${RST}      Hash image files as additional entropy (bootstrap only)\n"
     echo ""
     printf "${DIM}All seeds stored in: ~/.yubikey-seeds/${RST}\n"
@@ -179,15 +179,11 @@ BANNER
     echo "  yubi.sh bootstrap 15 ~/extra-passwords.txt"
     echo "  yubi.sh bootstrap 15 --mux"
     echo "  yubi.sh bootstrap 15 --no-external"
-    echo "  yubi.sh bootstrap 15 --entropy-file ~/entropy-data/pool.bin"
     echo "  yubi.sh bootstrap 15 --image-dir ~/photos"
-    echo "  yubi.sh entropy-collect"
-    echo "  yubi.sh entropy-collect --append ~/entropy-data/pool.bin"
     echo "  yubi.sh entropy-verify ~/entropy-data/pool.bin"
     echo "  yubi.sh configure otp"
     echo "  yubi.sh configure mixed 35276256"
     echo "  yubi.sh init otp"
-    echo "  yubi.sh init otp --entropy-file ~/entropy-data/pool.bin"
     echo "  yubi.sh status"
     echo "  yubi.sh list"
     exit 1
@@ -263,6 +259,7 @@ case "$CMD" in
                 "${passthrough_args[@]+"${passthrough_args[@]}"}"
         fi
         seed_pool_encrypt_atomic "$outfile" "$poolfile"
+        write_entropy_provenance "${poolfile}.provenance.json"
         log_ok "Encrypted seed pool written: $poolfile"
         ;;
 
@@ -274,6 +271,7 @@ case "$CMD" in
         log_info "Compound passwords will be encrypted to: $poolfile"
         "$SCRIPT_DIR/yubi-mux.sh" "$outfile"
         seed_pool_encrypt_atomic "$outfile" "$poolfile"
+        write_entropy_provenance "${poolfile}.provenance.json"
         ;;
 
     enrich)
@@ -311,6 +309,7 @@ case "$CMD" in
         "$SCRIPT_DIR/entropy-mix.sh" "$plain_in" "$outfile" \
             "${passthrough_args[@]+"${passthrough_args[@]}"}"
         seed_pool_encrypt_atomic "$outfile" "$poolfile"
+        write_entropy_provenance "${poolfile}.provenance.json"
         ;;
 
     # ----- Entropy collection (air-gapped workflows) -----

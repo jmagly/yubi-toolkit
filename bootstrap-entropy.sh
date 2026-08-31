@@ -9,16 +9,14 @@
 #     - Mouse movement sampling (position + timing via X11)
 #
 #   Local system:
-#     - CPU RDRAND (/dev/urandom)
+#     - Mandatory platform/OpenSSL CSPRNG
 #     - Thermal sensors (Linux: sysfs + lm-sensors; macOS: sysctl + ioreg)
 #     - Disk I/O timing jitter
 #
 #   External APIs (retry + degrade):
-#     - random.org (atmospheric noise)
-#     - NIST Beacon (randomness beacon)
-#     - drand (distributed randomness beacon)
+# Public beacon fetching is disabled unless a future verified client is added.
 #
-# Each seed is mixed via HKDF-SHA512 from all available sources.
+# Each seed is rooted in mandatory CSPRNG output and mixed with supplements.
 # Output: 10-20 base64 seeds (one per line), ready for configure-yubi.sh.
 #
 # Usage: ./bootstrap-entropy.sh <output_file> [count]
@@ -65,11 +63,11 @@ Usage: bootstrap-entropy.sh <output_file> [count] [extra_data_file] [options]
   extra_data_file:  optional file with extra entropy (one value per line)
 
 Options:
-  --no-external         Skip external API calls (local entropy only)
-  --entropy-file PATH   Use pre-collected entropy file instead of live APIs
+  --no-external         Compatibility no-op; networking is disabled
+  --entropy-file PATH   Rejected legacy unverified input
   --image-dir PATH      Hash image files as additional entropy (SHA-256, one per file)
 
-Generates high-quality entropy seeds from interactive + system + external
+Generates CSPRNG-rooted seeds with interactive and system supplements.
 sources for users who don't yet have configured YubiKeys.
 
 Output is compatible with configure-yubi.sh and entropy-mix.sh.
@@ -181,18 +179,11 @@ fi
 
 # Require OpenSSL 3.x (LibreSSL on macOS lacks `openssl kdf`)
 require_openssl3
+require_csprng
 
 # Check X11 mouse capture availability
 MOUSE_AVAILABLE=false
-if python3 -c "
-import ctypes, ctypes.util
-x11 = ctypes.cdll.LoadLibrary(ctypes.util.find_library('X11'))
-d = x11.XOpenDisplay(None)
-if d: x11.XCloseDisplay(d); exit(0)
-else: exit(1)
-" 2>/dev/null; then
-    MOUSE_AVAILABLE=true
-fi
+x11_available && MOUSE_AVAILABLE=true
 
 # =============================================================================
 # Welcome
@@ -309,7 +300,7 @@ finally:
     local timings="${data_line%%|*}"
     local chars="${data_line##*|}"
 
-    # Hash timing data (this is the real entropy — nanosecond intervals)
+    # Hash timing data as an unassessed supplement; no entropy claim is made.
     local timing_hash
     timing_hash=$(printf '%s' "$timings" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
@@ -421,12 +412,12 @@ JITTER_ENTROPY=$(printf '%s' "$JITTER_ENTROPY" \
 log_ok "Jitter entropy collected"
 
 # =============================================================================
-# Phase 3: External entropy
+# Phase 3: Public diversification policy
 # =============================================================================
 
 log_step "Phase 3: External Entropy Sources"
 
-# Use shared dispatcher — handles --no-external, --entropy-file, or live fetch
+# Dispatcher rejects legacy files and otherwise records disabled public input.
 ext_args=()
 [[ "$NO_EXTERNAL" == "true" ]] && ext_args+=(--no-external)
 [[ -n "$ENTROPY_FILE_PATH" ]] && ext_args+=(--entropy-file "$ENTROPY_FILE_PATH")
@@ -441,7 +432,7 @@ ext_ok="$EXT_SOURCES_OK"
 log_step "Phase 4: Generating $SEED_COUNT Seeds"
 
 echo "Each seed mixes: your keyboard timing + mouse movement + CPU RNG"
-echo "                 + thermal sensors + disk jitter + external APIs"
+echo "                 + unassessed thermal and timing supplements"
 if [[ ${#EXTRA_POOL[@]} -gt 0 ]]; then
     echo "                 + extra data file (${#EXTRA_POOL[@]} lines, random selection)"
 fi
@@ -451,7 +442,7 @@ declare -a seeds=()
 
 for (( s=0; s<SEED_COUNT; s++ )); do
     # Fresh CPU entropy per seed
-    cpu_ent=$(openssl rand -hex 32)
+    cpu_ent=$(csprng_hex 32) || { log_err "CSPRNG failed during seed generation"; exit 1; }
 
     # Fresh thermal snapshot per seed (cheap — sysfs/sysctl only, no lm-sensors)
     if [[ "$_IS_MACOS" == "true" ]]; then
@@ -474,7 +465,7 @@ for (( s=0; s<SEED_COUNT; s++ )); do
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Per-seed external entropy slices (unique via seed index + random nonce)
-    nonce=$(openssl rand -hex 8)
+    nonce=$(csprng_hex 8) || { log_err "CSPRNG failed during seed generation"; exit 1; }
     ext1=$(printf '%s:%d:%s' "$EXT_RANDOM_ORG" "$s" "$nonce" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
     ext2=$(printf '%s:%d:%s' "$EXT_NIST" "$s" "$nonce" \
@@ -482,8 +473,9 @@ for (( s=0; s<SEED_COUNT; s++ )); do
     ext3=$(printf '%s:%d:%s' "$EXT_DRAND" "$s" "$nonce" \
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
-    # Build IKM from interactive entropy (the user's unique contribution)
-    ikm_raw="${KEY_ENTROPY}:${MOUSE_ENTROPY}:seed${s}:$(now_ns)"
+    # The mandatory CSPRNG output is the secret root. Human and sensor inputs
+    # are unassessed supplements; security does not depend on their entropy.
+    ikm_raw="${cpu_ent}:${KEY_ENTROPY}:${MOUSE_ENTROPY}:seed${s}:$(now_ns)"
 
     # Mix in a randomly selected line from extra data file (if provided)
     if [[ ${#EXTRA_POOL[@]} -gt 0 ]]; then
@@ -494,7 +486,7 @@ for (( s=0; s<SEED_COUNT; s++ )); do
     ikm_hex=$(printf '%s' "$ikm_raw" | openssl dgst -sha512 -hex 2>/dev/null | awk '{print $NF}')
 
     # Build salt from all system + external entropy
-    salt_hex="${cpu_ent}${THERMAL_ENTROPY}${fresh_thermal}${JITTER_ENTROPY}${fresh_jitter}"
+    salt_hex="${THERMAL_ENTROPY}${fresh_thermal}${JITTER_ENTROPY}${fresh_jitter}"
     salt_hex+="${ext1}${ext2}${ext3}"
 
     # Info field: unique per seed
@@ -550,7 +542,7 @@ if [[ "$MOUSE_AVAILABLE" == "true" ]]; then
 else
     log_ok "  Extra keyboard:     1 additional round (no X11)"
 fi
-log_ok "  CPU RDRAND:         fresh per seed"
+log_ok "  Platform CSPRNG:    mandatory fresh secret root per seed"
 log_ok "  Thermal sensors:    baseline + fresh per seed"
 log_ok "  Disk I/O jitter:    baseline + fresh per seed"
 if [[ $ext_ok -gt 0 ]]; then

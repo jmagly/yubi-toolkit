@@ -145,6 +145,49 @@ harden_process() {
     ulimit -c 0     # Disable core dumps (prevents secret material on disk)
 }
 
+csprng_hex() {
+    local bytes="$1" output
+    if [[ -n "${YUBI_CSPRNG_COMMAND:-}" ]]; then
+        output=$("$YUBI_CSPRNG_COMMAND" "$bytes" 2>/dev/null) || return 1
+    else
+        output=$(openssl rand -hex "$bytes" 2>/dev/null) || return 1
+    fi
+    [[ "$output" =~ ^[0-9a-fA-F]+$ && ${#output} -eq $(( bytes * 2 )) ]] || return 1
+    printf '%s' "$output" | tr '[:upper:]' '[:lower:]'
+}
+
+require_csprng() {
+    local sample
+    sample=$(csprng_hex 32) || {
+        log_err "Platform CSPRNG failed; refusing to generate credential material"
+        return 1
+    }
+}
+
+x11_available() {
+    case "${YUBI_TEST_X11_STATUS:-}" in
+        available) return 0 ;;
+        unavailable) return 1 ;;
+    esac
+    python3 -c '
+import ctypes, ctypes.util
+library = ctypes.util.find_library("X11")
+if not library: raise SystemExit(1)
+x11 = ctypes.cdll.LoadLibrary(library)
+display = x11.XOpenDisplay(None)
+if display: x11.XCloseDisplay(display); raise SystemExit(0)
+raise SystemExit(1)
+' 2>/dev/null
+}
+
+write_entropy_provenance() {
+    local file="$1" tmp
+    tmp=$(mktemp "$(dirname "$file")/.provenance.XXXXXX")
+    chmod 600 "$tmp"
+    printf '%s\n' '{"version":1,"secret_root":"platform-csprng","supplements":"unassessed-human-sensor-image-timing","public_diversification":"disabled-unverified-beacons-removed"}' > "$tmp"
+    mv -f "$tmp" "$file"
+}
+
 # =============================================================================
 # OpenSSL version check
 # =============================================================================
@@ -591,21 +634,8 @@ ENTROPY_RETRY_DELAY=2
 # Usage: call_external <name> <curl_args...>
 # Returns: response on stdout, exit 0 on success, exit 1 on failure
 call_external() {
-    local name="$1"; shift
-    local attempt=0
-    local response=""
-    while (( attempt < ENTROPY_RETRY_MAX )); do
-        attempt=$(( attempt + 1 ))
-        response=$(curl -sf --max-time 10 "$@" 2>/dev/null) && break
-        log_warn "$name: attempt $attempt/$ENTROPY_RETRY_MAX failed"
-        sleep "$ENTROPY_RETRY_DELAY"
-        response=""
-    done
-    if [[ -z "$response" ]]; then
-        log_warn "$name: ALL RETRIES FAILED — degrading"
-        echo ""; return 1
-    fi
-    echo "$response"; return 0
+    log_err "Live public-beacon fetching was removed because responses were not cryptographically verified"
+    return 1
 }
 
 # Fetch all three external entropy sources. Sets EXT_RANDOM_ORG, EXT_NIST,
@@ -616,29 +646,8 @@ fetch_all_external_entropy() {
     EXT_NIST=""
     EXT_DRAND=""
     EXT_SOURCES_OK=0
-
-    log_info "Fetching random.org..."
-    if EXT_RANDOM_ORG=$(call_external "random.org" \
-        "https://www.random.org/integers/?num=10&min=0&max=1000000000&col=1&base=10&format=plain&rnd=new"); then
-        log_ok "random.org"
-        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
-    fi
-
-    log_info "Fetching NIST Beacon..."
-    if EXT_NIST=$(call_external "NIST Beacon" \
-        "https://beacon.nist.gov/beacon/2.0/pulse/last"); then
-        log_ok "NIST Beacon"
-        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
-    fi
-
-    log_info "Fetching drand..."
-    if EXT_DRAND=$(call_external "drand" \
-        "https://drand.cloudflare.com/public/latest"); then
-        log_ok "drand"
-        EXT_SOURCES_OK=$(( EXT_SOURCES_OK + 1 ))
-    fi
-
-    log_info "External sources: $EXT_SOURCES_OK/3"
+    log_err "Live public-beacon fetching is disabled"
+    return 1
 }
 
 # =============================================================================
@@ -872,13 +881,19 @@ get_external_entropy() {
     fi
 
     if [[ -n "$entropy_file" ]]; then
-        log_info "Loading external entropy from file: $entropy_file"
-        load_external_entropy "$entropy_file"
-        return 0
+        EXT_RANDOM_ORG=""
+        EXT_NIST=""
+        EXT_DRAND=""
+        EXT_SOURCES_OK=0
+        log_err "Legacy external entropy files are provenance-only and cannot be mixed"
+        return 1
     fi
 
-    # Default: live API fetch
-    fetch_all_external_entropy
+    EXT_RANDOM_ORG=""
+    EXT_NIST=""
+    EXT_DRAND=""
+    EXT_SOURCES_OK=0
+    log_info "Public diversification disabled: unverified live beacons were removed"
     return 0
 }
 

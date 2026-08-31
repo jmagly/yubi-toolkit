@@ -2,7 +2,7 @@
 
 [![Built With AIWG](https://aiwg.io/assets/badges/built-with-aiwg-dark.png)](https://aiwg.io)
 
-A bash toolkit for generating high-entropy cryptographic seeds and fully initializing YubiKeys with user-controlled secrets. Replaces all factory-programmed credentials (OTP AES keys, PIV PIN, PUK, management key) with entropy derived from multiple independent sources.
+A Bash toolkit for generating CSPRNG-rooted credential seeds and provisioning a named YubiKey application scope with operator-controlled values.
 
 ## Why?
 
@@ -10,23 +10,23 @@ YubiKeys ship with factory-programmed secrets. While Yubico's manufacturing proc
 
 ## Entropy Sources
 
-Every seed is mixed from **all available sources** via HKDF-SHA512:
+Every seed has one mandatory security root: the platform/OpenSSL CSPRNG. A
+CSPRNG read or shape failure is fatal. Other inputs are supplements with no
+claimed or estimated min-entropy:
 
-| Source | Type | Description |
+| Source | Classification | Description |
 |--------|------|-------------|
-| Keyboard timing | Interactive | Nanosecond inter-keystroke intervals (2 rounds, 50 chars each) |
-| Mouse movement | Interactive | X11 cursor position sampling (80 samples at 50ms) |
-| CPU RDRAND | Local | `/dev/urandom` -- fresh per seed |
-| Thermal sensors | Local | Linux: sysfs thermal zones + lm-sensors. macOS: sysctl + vm_stat + ioreg power state. (baseline + fresh per seed on both) |
-| Disk I/O jitter | Local | Timing variance of urandom reads (baseline + fresh per seed) |
-| random.org | External | Atmospheric noise integers |
-| NIST Beacon | External | Randomness beacon pulse |
-| drand | External | Distributed randomness beacon |
-| YubiKey passwords | Hardware | Compound passwords from 2 source YubiKeys (mux mode) |
-| Image files | Optional | SHA-256 hashes of user-supplied image files (`--image-dir`) |
-| Extra file | Optional | User-supplied data mixed in per seed |
+| OpenSSL/platform CSPRNG | Mandatory secret root | Fresh 256-bit output per seed |
+| Keyboard and mouse timing | Unassessed supplement | No min-entropy claim |
+| Thermal and I/O timing | Unassessed supplement | No min-entropy claim |
+| YubiKey passwords | Unassessed supplement | Operator-controlled input |
+| Image and extra files | Unassessed supplement | Content hashes/input data |
+| Public beacons/APIs | Disabled | Unverified NIST, drand, and random.org paths were removed |
 
-External APIs use retry+degrade -- if a source fails after 3 attempts, the system continues without it. No single source compromise can weaken the output.
+Public beacon values are public diversification, not secret entropy. They are
+not used because the former implementation did not verify signatures and chain
+parameters. Pool-adjacent provenance records this policy separately from seed
+material.
 
 ## Quick Start
 
@@ -96,7 +96,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 #### macOS notes
 
 - **No `lm-sensors` needed** -- the toolkit collects equivalent system entropy from `sysctl`, `vm_stat`, and `ioreg` automatically.
-- **No X11 mouse capture** -- macOS uses Quartz, not X11. The toolkit automatically falls back to an extra keyboard entropy round, which provides strong entropy via nanosecond keystroke timing.
+- **No X11 mouse capture** -- macOS uses Quartz, not X11. The toolkit records another unassessed keyboard-timing supplement instead.
 - **No native `tmpfs`** -- `init` fails closed on macOS unless you explicitly pass `--allow-disk-workspace`. That override permits plaintext temporary files on persistent storage; deletion cannot guarantee sanitization of APFS snapshots, journals, or flash blocks.
 - **Apple's bash 3.2 works** -- you do not need to `brew install bash`. The toolkit avoids bash 4-only features.
 
@@ -117,8 +117,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 
 | Command | Description |
 |---------|-------------|
-| `yubi.sh entropy-collect [file]` | Collect external entropy to a portable file |
-| `yubi.sh entropy-collect --append <file>` | Append new entropy to existing file |
+| `yubi.sh entropy-collect` | Removed; exits because unverified public inputs are forbidden |
 | `yubi.sh entropy-verify <file>` | Validate integrity and report contents of entropy file |
 
 ### Key Programming
@@ -145,8 +144,8 @@ The `bootstrap`, `enrich`, and `init` commands support these flags for air-gappe
 
 | Flag | Description |
 |------|-------------|
-| `--no-external` | Skip all external API calls; use local entropy only |
-| `--entropy-file <path>` | Use pre-collected entropy file instead of live API calls |
+| `--no-external` | Compatibility no-op; live external sources are disabled |
+| `--entropy-file <path>` | Rejected: legacy unverified beacon files are provenance-only |
 | `--image-dir <path>` | Hash image files as additional entropy (bootstrap only) |
 
 ### OTP Modes
@@ -157,62 +156,16 @@ The `bootstrap`, `enrich`, and `init` commands support these flags for air-gappe
 | `static` | Static password | Static password |
 | `mixed` | Yubico OTP | Static password |
 
-## Air-Gapped YubiKey Provisioning
+## Offline operation
 
-For high-security environments where the provisioning machine must not have network access, the toolkit supports a split workflow:
+Seed generation and provisioning make no network requests. The deprecated
+`entropy-collect` command fails closed, and legacy `--entropy-file` inputs are
+not mixed because their public-beacon signatures were never verified. Operators
+may archive those files as provenance, but they are not credential material.
 
-### 1. Collect entropy on a networked machine
-
-```bash
-# One-shot: grab entropy from all external sources
-./yubi.sh entropy-collect
-
-# Or accumulate entropy over time (stronger -- spans multiple time windows)
-./yubi.sh entropy-collect --append ~/entropy-data/pool.bin
-./yubi.sh entropy-collect --append ~/entropy-data/pool.bin  # again later
-./yubi.sh entropy-collect --append ~/entropy-data/pool.bin  # days later
-
-# Collect from specific sources only
-./yubi.sh entropy-collect --sources random.org,drand
-
-# Cron-friendly (minimal output)
-./yubi.sh entropy-collect --append ~/entropy-data/pool.bin --quiet
-```
-
-### 2. Transfer via sneakernet
-
-```bash
-# Verify the file before copying
-./yubi.sh entropy-verify ~/entropy-data/pool.bin
-
-# Copy to removable media
-cp ~/entropy-data/pool.bin /media/usb/
-```
-
-### 3. Provision on air-gapped machine
-
-```bash
-# Generate seeds using pre-collected external entropy
-./yubi.sh bootstrap 15 --entropy-file /media/usb/pool.bin
-
-# Or run the full pipeline air-gapped
-./yubi.sh init otp --entropy-file /media/usb/pool.bin
-
-# Enrich existing seeds with pre-collected entropy
-./yubi.sh enrich --entropy-file /media/usb/pool.bin
-
-# Or skip external entropy entirely (local sources only)
-./yubi.sh bootstrap 15 --no-external
-```
-
-### Entropy File Format
-
-Collected entropy files use a text-based format (`YUBI-ENTROPY-V1`) that is:
-- Inspectable with standard tools (`cat`, `grep`, `head`)
-- Integrity-checked via SHA-256 hash per block
-- Appendable -- multiple collection runs accumulate blocks
-- Source-tagged -- each block records its origin (random.org, NIST, drand) and timestamp
-
+Each encrypted pool receives a separate mode-600 `.provenance.json` record
+identifying the platform CSPRNG as the secret root, human/sensor/image inputs as
+unassessed supplements, and public diversification as disabled.
 ## Architecture
 
 ### Two Paths
@@ -239,11 +192,11 @@ Each YubiKey initialization consumes **5 seeds** from the pool:
 
 All entropy combination uses HKDF (HMAC-based Key Derivation Function):
 
-- **IKM** (Input Key Material): User-controlled entropy (passwords, keyboard timing, mouse movement)
-- **Salt**: System entropy (CPU RNG, thermal, jitter, external APIs or pre-collected file)
+- **IKM** (Input Key Material): mandatory fresh CSPRNG output plus supplements
+- **Salt**: domain-separated sensor/timing supplements
 - **Info**: Unique per-seed label for domain separation
 
-This ensures that even if some entropy sources are compromised, the output remains unpredictable as long as any single source provides genuine randomness.
+Security depends on the mandatory CSPRNG, not on an unmeasured assumption about any supplement.
 
 Credential expansion uses the versioned `YUBI-CRED-V2` suite, independent
 application/purpose labels, and unbiased rejection sampling. Persistent-pool
@@ -348,7 +301,7 @@ All seed file management is automatic -- you never need to specify paths.
 | `yubi-lib.sh` | Shared library (logging, age pools, tmpfs, entropy file I/O) |
 | `bootstrap-entropy.sh` | Interactive seed generation for new users |
 | `entropy-mix.sh` | Batch HKDF-SHA512 enrichment of password lists |
-| `entropy-collect.sh` | Standalone external entropy collection for air-gapped workflows |
+| `entropy-collect.sh` | Fail-closed compatibility stub for the removed beacon collector |
 | `entropy-verify.sh` | Entropy file integrity validation and reporting |
 | `yubi-mux.sh` | 2-device password collection and random pairing |
 | `configure-yubi.sh` | YubiKey programmer (PIV + OTP slots) |
@@ -385,14 +338,13 @@ macOS Bash 3.2 gate and hardware-test boundary.
 
 - **OTP slots programmed with custom keys will NOT validate against YubiCloud.** This is intentional -- you're replacing Yubico's trust chain with your own. You must operate your own OTP validation server (e.g., [yubikey-val](https://developers.yubico.com/yubikey-val/)).
 - **Recovery output is opt-in**: use `--recovery-file` with an age recipient when invoking the configuration script. Generated values are never printed; without an encrypted recovery sink they are not retained.
-- **PIV auto-reset**: If a key was previously initialized, `configure` will offer to reset PIV to factory defaults before reprogramming.
+- **Application resets are separate**: provisioning never resets PIV or FIDO2 automatically.
 - **AES256 management key**: Automatically used on firmware 5.4.2+ (NIST deprecated TDES post-2023). Falls back to TDES on older keys.
-- **FIDO2 PIN**: Set automatically during initialization using the same PIN as PIV.
+- **FIDO2 PIN**: Optional and independently derived from the PIV PIN.
 - **Process hardening**: All scripts set `umask 077` (files never group/world-readable) and `ulimit -c 0` (no core dumps containing secrets).
 - **HKDF salt binding**: Credential derivation uses the YubiKey serial number as HKDF salt, binding derived credentials to the specific target device.
 - **OpenSSL 3.x required**: The `openssl kdf` command used for HKDF is not available in OpenSSL 1.x (Ubuntu 20.04 and earlier). Scripts check this at startup.
-- **Entropy files are sensitive**: A collected entropy file reduces unpredictability if leaked alongside derived seeds. Treat them with the same care as seed files. Files are created mode 600 by default.
-- **External entropy is supplementary**: On an air-gapped machine, local sources (CPU RNG, thermal, jitter, keyboard, mouse) remain the primary entropy. Pre-collected external entropy improves the salt but is not required.
+- **Entropy trust**: the platform CSPRNG is the mandatory secret root. Timing, thermal, mouse, image, and human inputs are unassessed supplements with no min-entropy claim.
 - **Programming transport**: generated values are passed to the pinned public Yubico Python API through a mode-0600 descriptor on stdin. They are not placed in process arguments or exported environment variables.
 
 ## Troubleshooting
@@ -409,10 +361,10 @@ Ensure `ykman` is installed and your YubiKey is inserted. Try `ykman list` to ve
 On macOS, you may need to grant USB device access to your terminal app the first time you use ykman. If `ykman list` hangs, unplug and replug the key.
 
 ### Mouse entropy falls back to keyboard
-This happens when no X11 display is available -- always the case on macOS (which uses Quartz, not X11), and on headless Linux, Wayland-only sessions, or SSH sessions. The toolkit automatically collects an extra keyboard entropy round instead. The security impact is minimal -- keyboard timing provides strong entropy via nanosecond inter-keystroke intervals.
+This happens when no X11 display is available -- always the case on macOS (which uses Quartz, not X11), and on headless Linux, Wayland-only sessions, or SSH sessions. The toolkit collects another keyboard sample, but makes no entropy estimate for either input; the CSPRNG remains the security root.
 
-### External API failures
-All external sources (random.org, NIST Beacon, drand) degrade gracefully. If all three fail, seeds are generated from local entropy only. For environments without network access, use `--no-external` or the air-gapped workflow with `--entropy-file`.
+### External API inputs are rejected
+Live NIST, drand, and random.org paths were removed because the previous code did not authenticate them. Legacy external files are not mixed. This cannot weaken generated values because public inputs were never a required secret source.
 
 ### Entropy file validation fails
 Run `yubi.sh entropy-verify <file>` for diagnostics. Common causes: file was truncated during transfer, or modified after collection (SHA-256 mismatch).

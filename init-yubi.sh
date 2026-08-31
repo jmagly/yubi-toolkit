@@ -25,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/yubi-lib.sh"
 harden_process
 require_openssl3
+require_csprng
 
 # --- Arguments ---
 if [[ $# -lt 2 ]]; then
@@ -37,8 +38,8 @@ Usage: init-yubi.sh <MODE> <SERIAL> [options]
   SERIAL: target YubiKey serial (run 'ykman list --serials')
 
 Options:
-  --entropy-file PATH   Use pre-collected entropy file instead of live APIs
-  --no-external         Skip external API calls (local entropy only)
+  --entropy-file PATH   Rejected legacy unverified input
+  --no-external         Compatibility no-op; public APIs are disabled
   --allow-disk-workspace
                         Permit plaintext temporary files on persistent storage
   --recovery-file PATH  Write an encrypted recovery record
@@ -294,16 +295,7 @@ log_ok "Keyboard entropy: ${#KEY_ENTROPY} hex chars collected"
 # --- Mouse movement ---
 MOUSE_ENTROPY=""
 MOUSE_AVAILABLE=false
-
-if python3 -c "
-import ctypes, ctypes.util
-x11 = ctypes.cdll.LoadLibrary(ctypes.util.find_library('X11'))
-d = x11.XOpenDisplay(None)
-if d: x11.XCloseDisplay(d); exit(0)
-else: exit(1)
-" 2>/dev/null; then
-    MOUSE_AVAILABLE=true
-fi
+x11_available && MOUSE_AVAILABLE=true
 
 if [[ "$MOUSE_AVAILABLE" == "true" ]]; then
     echo ""
@@ -467,7 +459,7 @@ enrich_seed() {
 
     # Fresh local entropy
     local cpu_ent
-    cpu_ent=$(openssl rand -hex 32)
+    cpu_ent=$(csprng_hex 32) || { log_err "CSPRNG failed during seed enrichment"; return 1; }
 
     # Fresh thermal read + timestamp (cheap per-seed snapshot)
     local thermal_ent=""
@@ -499,11 +491,11 @@ enrich_seed() {
         | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
 
     # Build salt from all non-seed entropy
-    local salt_hex="${cpu_ent}${thermal_ent}${jitter_ent}${ext1}${ext2}${ext3}"
+    local salt_hex="${thermal_ent}${jitter_ent}${ext1}${ext2}${ext3}"
 
     # IKM is compound password + interactive entropy (keyboard timing + mouse)
     local ikm_hex
-    ikm_hex=$(printf '%s:%s:%s' "$raw_seed" "$KEY_ENTROPY" "$MOUSE_ENTROPY" \
+    ikm_hex=$(printf '%s:%s:%s:%s' "$cpu_ent" "$raw_seed" "$KEY_ENTROPY" "$MOUSE_ENTROPY" \
         | xxd -p | tr -d '\n')
 
     local info_hex
