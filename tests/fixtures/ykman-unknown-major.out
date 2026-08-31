@@ -1,0 +1,9 @@
+Device type: YubiKey 5 NFC
+Serial number: 12345678
+Firmware version: 6.0.0
+Enabled USB interfaces: OTP, FIDO, CCID
+
+Applications
+Yubico OTP         Enabled
+FIDO2              Enabled
+PIV                Enabled

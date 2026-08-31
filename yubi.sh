@@ -12,6 +12,7 @@
 #   list                             Show connected YubiKeys
 #   info        [serial]             Detailed info for a specific key
 #   status                           Show seed pool status
+#   doctor      [serial]             Report dependency and device support
 #   purge                            Securely delete empty/exhausted seed files
 #
 # Persistent pools are authenticated age ciphertext in ~/.yubikey-seeds/.
@@ -158,6 +159,7 @@ BANNER
     printf "  ${GRN}list${RST}                                   Show connected YubiKeys\n"
     printf "  ${GRN}info${RST}             [serial]              Detailed info (auto-detects single key)\n"
     printf "  ${GRN}status${RST}                                 Show seed pool status\n"
+    printf "  ${GRN}doctor${RST}           [serial]              Dependency and capability report\n"
     printf "  ${GRN}purge${RST}                                  Securely wipe empty/exhausted seed files\n"
     echo ""
     printf "${BLD}Modes:${RST}  otp | static | mixed\n"
@@ -397,6 +399,10 @@ case "$CMD" in
         ;;
 
     # ----- Info commands -----
+
+    doctor)
+        exec "$SCRIPT_DIR/yubi-doctor.sh" "$@"
+        ;;
 
     list)
         require_ykman

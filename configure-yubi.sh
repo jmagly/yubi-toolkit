@@ -113,11 +113,12 @@ cleanup_configure() {
 }
 trap cleanup_configure EXIT
 
-# --- Detect firmware version for AES256 management key support ---
-fw_version=$(ykman -d "$SERIAL" info 2>/dev/null | grep 'Firmware version:' | awk '{print $NF}')
-fw_major=$(echo "$fw_version" | cut -d. -f1)
-fw_minor=$(echo "$fw_version" | cut -d. -f2)
-fw_patch=$(echo "$fw_version" | cut -d. -f3)
+# Inventory product, firmware, interfaces, and applications before mutation.
+yubikey_capability_preflight "$SERIAL"
+fw_version="$DEVICE_FIRMWARE"
+fw_major="$DEVICE_FW_MAJOR"
+fw_minor="$DEVICE_FW_MINOR"
+fw_patch="$DEVICE_FW_PATCH"
 
 if [[ "$fw_major" -gt 5 ]] || \
    [[ "$fw_major" -eq 5 && "$fw_minor" -gt 4 ]] || \

@@ -1,0 +1,8 @@
+Device type: Security Key NFC
+Serial number: 12345678
+Firmware version: 5.7.1
+Form factor: Keychain (USB-A)
+Enabled USB interfaces: FIDO
+
+Applications
+FIDO2              Enabled

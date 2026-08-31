@@ -176,6 +176,69 @@ require_openssl3() {
     fi
 }
 
+openssl_hkdf_kat() {
+    local output expected
+    expected="8a343ebf7af154aef74eb9befa06127aefc81ce04df181d10ceca10853eda9ec0255f649fa8f7f6e9e66"
+    output=$(openssl kdf -keylen 42 \
+        -kdfopt digest:SHA256 \
+        -kdfopt hexkey:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b \
+        -kdfopt hexsalt:000102030405060708090a0b0c \
+        -kdfopt hexinfo:f0f1f2f3f4f5f6f7f8f9 HKDF 2>/dev/null \
+        | tr -d ':' | tr '[:upper:]' '[:lower:]') || return 1
+    [[ "$output" == "$expected" ]]
+}
+
+version_triplet() {
+    local value="$1"
+    [[ "$value" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+    VERSION_MAJOR="${BASH_REMATCH[1]}"
+    VERSION_MINOR="${BASH_REMATCH[2]}"
+    VERSION_PATCH="${BASH_REMATCH[3]}"
+}
+
+ykman_supported_version() {
+    local raw version
+    raw=$(ykman --version 2>/dev/null) || return 1
+    version=$(printf '%s\n' "$raw" | sed -n 's/.*version: \([0-9][0-9.]*\).*/\1/p')
+    version_triplet "$version" || return 1
+    [[ "$VERSION_MAJOR" -eq 5 && "$VERSION_MINOR" -ge 5 && "$VERSION_MINOR" -le 9 ]]
+}
+
+# Inventory a target without mutating it. Exports DEVICE_* fields on success.
+yubikey_capability_preflight() {
+    local serial="$1" info
+    validate_serial "$serial"
+    ykman_supported_version || { log_err "Supported ykman range is 5.5.x through 5.9.x"; return 1; }
+    info=$(ykman -d "$serial" info 2>/dev/null) || { log_err "Unable to inventory YubiKey $serial"; return 1; }
+    DEVICE_TYPE=$(printf '%s\n' "$info" | sed -n 's/^Device type: //p')
+    DEVICE_FIRMWARE=$(printf '%s\n' "$info" | sed -n 's/^Firmware version: //p')
+    DEVICE_INTERFACES=$(printf '%s\n' "$info" | sed -n 's/^Enabled USB interfaces: //p')
+    [[ -n "$DEVICE_TYPE" && -n "$DEVICE_FIRMWARE" && -n "$DEVICE_INTERFACES" ]] || {
+        log_err "Malformed or incomplete ykman device inventory"; return 1;
+    }
+    case "$DEVICE_TYPE" in
+        "YubiKey 5"*) ;;
+        *) log_err "Unsupported or ambiguous product: $DEVICE_TYPE"; return 1 ;;
+    esac
+    version_triplet "$DEVICE_FIRMWARE" || { log_err "Malformed firmware version: $DEVICE_FIRMWARE"; return 1; }
+    [[ "$VERSION_MAJOR" -eq 5 && "$VERSION_MINOR" -ge 4 && "$VERSION_MINOR" -le 8 ]] || {
+        log_err "Supported firmware range is YubiKey 5.4.x through 5.8.x"; return 1;
+    }
+    DEVICE_FW_MAJOR="$VERSION_MAJOR"
+    DEVICE_FW_MINOR="$VERSION_MINOR"
+    DEVICE_FW_PATCH="$VERSION_PATCH"
+    case ",$DEVICE_INTERFACES," in
+        *,OTP,*CCID,*|*,CCID,*OTP,*) ;;
+        *) log_err "Required OTP and CCID interfaces are not enabled"; return 1 ;;
+    esac
+    for application in "Yubico OTP" PIV FIDO2; do
+        printf '%s\n' "$info" | grep -Eq "^${application}[[:space:]]+Enabled$" || {
+            log_err "Required application is absent or disabled: $application"; return 1;
+        }
+    done
+    export DEVICE_TYPE DEVICE_FIRMWARE DEVICE_INTERFACES DEVICE_FW_MAJOR DEVICE_FW_MINOR DEVICE_FW_PATCH
+}
+
 # =============================================================================
 # Serial number validation
 # =============================================================================

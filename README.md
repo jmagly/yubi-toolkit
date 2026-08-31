@@ -135,6 +135,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 | `yubi.sh list` | Show connected YubiKeys |
 | `yubi.sh info [serial]` | Detailed info for a specific key |
 | `yubi.sh status` | Show seed pool status |
+| `yubi.sh doctor [serial]` | Machine-readable dependency and device support report (`--json`) |
 | `yubi.sh purge` | Securely delete empty/exhausted seed files |
 
 ### Air-Gapped Flags
@@ -320,6 +321,21 @@ All seed file management is automatic -- you never need to specify paths.
 | `yubi-mux.sh` | 2-device password collection and random pairing |
 | `configure-yubi.sh` | YubiKey programmer (PIV + OTP slots) |
 | `init-yubi.sh` | End-to-end pipeline (collect -> mux -> enrich -> program) |
+
+## Supported tool and device policy
+
+Run `./yubi.sh doctor --json [serial]` before provisioning or in automation.
+The current tested policy is:
+
+- Bash 3.2, 4.x, or 5.x and Python 3
+- OpenSSL 3.x with a passing deterministic HKDF-SHA256 known-answer test
+- YubiKey Manager (`ykman`) 5.5.x through 5.9.x
+- YubiKey 5 family firmware 5.4.x through 5.8.x with OTP, CCID, Yubico
+  OTP, PIV, and FIDO2 enabled
+
+Unknown major versions and products are intentionally rejected until fixtures
+and hardware verification establish support. FIDO-only Security Key and
+YubiKey Bio products cannot satisfy the OTP/PIV provisioning profile.
 
 ## Development and tests
 
