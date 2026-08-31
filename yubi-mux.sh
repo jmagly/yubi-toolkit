@@ -12,6 +12,9 @@ set -euo pipefail
 umask 077       # New files owner-only
 ulimit -c 0     # Disable core dumps
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$SCRIPT_DIR/yubi-lib.sh"
+
 # --- Logging ---
 RED='\033[0;31m'
 YLW='\033[0;33m'
@@ -102,19 +105,10 @@ fi
 log_info "Creating $pair_count compound passwords"
 
 # --- Fisher-Yates shuffle both arrays independently ---
-shuffle_array() {
-    local -n arr=$1
-    local n=${#arr[@]}
-    for (( i=n-1; i>0; i-- )); do
-        local j=$(( $(od -An -tu4 -N4 /dev/urandom | tr -d ' ') % (i + 1) ))
-        local tmp="${arr[$i]}"
-        arr[$i]="${arr[$j]}"
-        arr[$j]="$tmp"
-    done
-}
-
-shuffle_array dev1
-shuffle_array dev2
+shuffle_values "${dev1[@]}"
+dev1=("${SHUFFLED_VALUES[@]}")
+shuffle_values "${dev2[@]}"
+dev2=("${SHUFFLED_VALUES[@]}")
 
 # --- Pair and randomize concatenation order ---
 declare -a output=()

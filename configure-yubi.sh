@@ -275,7 +275,7 @@ case "$MODE" in
 esac
 
 # --- OTP Slot 1 ---
-# Use scalar variables instead of `declare -A` for bash 3.2 compat (macOS).
+# Use scalar variables instead of associative arrays for Bash 3.2 compatibility.
 slot1_desc=""
 slot2_desc=""
 if [[ "$slot1_mode" == "otp" ]]; then

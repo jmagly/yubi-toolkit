@@ -343,19 +343,10 @@ log_info " Step 2: Mux source passwords"
 log_info "============================================"
 
 # Fisher-Yates shuffle both arrays independently
-shuffle_array() {
-    local -n arr=$1
-    local n=${#arr[@]}
-    for (( i=n-1; i>0; i-- )); do
-        local j=$(( $(od -An -tu4 -N4 /dev/urandom | tr -d ' ') % (i + 1) ))
-        local tmp="${arr[$i]}"
-        arr[$i]="${arr[$j]}"
-        arr[$j]="$tmp"
-    done
-}
-
-shuffle_array dev1
-shuffle_array dev2
+shuffle_values "${dev1[@]}"
+dev1=("${SHUFFLED_VALUES[@]}")
+shuffle_values "${dev2[@]}"
+dev2=("${SHUFFLED_VALUES[@]}")
 
 # Pair with random order
 declare -a muxed=()

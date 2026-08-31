@@ -20,6 +20,9 @@ target before release:
 /bin/bash ./tests/run.sh
 ```
 
+The suite executes the shared shuffle helper and rejects known Bash 4+
+constructs such as namerefs and associative arrays.
+
 ShellCheck may be installed with Homebrew. GNU `timeout` is optional on macOS;
 the focused interrupt test reports an explicit skip when it is unavailable,
 while HUP and TERM cleanup still run.

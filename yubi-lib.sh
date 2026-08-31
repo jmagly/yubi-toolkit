@@ -200,6 +200,21 @@ validate_mode() {
     fi
 }
 
+# Shuffle positional values without namerefs (which require Bash 4.3+).
+# Results are returned in a global indexed array for Apple's Bash 3.2.
+shuffle_values() {
+    SHUFFLED_VALUES=("$@")
+    local n=${#SHUFFLED_VALUES[@]}
+    local i j tmp random_word
+    for (( i=n-1; i>0; i-- )); do
+        random_word=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
+        j=$(( random_word % (i + 1) ))
+        tmp="${SHUFFLED_VALUES[$i]}"
+        SHUFFLED_VALUES[$i]="${SHUFFLED_VALUES[$j]}"
+        SHUFFLED_VALUES[$j]="$tmp"
+    done
+}
+
 # =============================================================================
 # Secure file deletion
 # =============================================================================
