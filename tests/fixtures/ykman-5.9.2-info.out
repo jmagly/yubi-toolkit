@@ -1,0 +1,14 @@
+Device type: YubiKey 5C NFC
+Serial number: 12345678
+Firmware version: 5.8.1
+Form factor: Keychain (USB-C)
+Enabled USB interfaces: OTP, FIDO, CCID
+
+Applications
+Yubico OTP         Enabled
+FIDO U2F           Enabled
+FIDO2              Enabled
+OATH               Enabled
+PIV                Enabled
+OpenPGP             Enabled
+YubiHSM Auth        Enabled

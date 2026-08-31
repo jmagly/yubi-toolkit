@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'YubiKey Manager (ykman) version: %s\n' "${YUBI_TEST_YKMAN_VERSION:-5.9.2}"
+    exit 0
+fi
+
+if [[ -n "${YUBI_TEST_YKMAN_FIXTURE:-}" && "${*: -1}" == "info" ]]; then
+    sed -n '1,240p' "$YUBI_TEST_YKMAN_FIXTURE"
+    exit 0
+fi
+
+printf 'unsupported mocked ykman invocation: %s\n' "$*" >&2
+exit 64

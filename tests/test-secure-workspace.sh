@@ -8,10 +8,14 @@ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 ok() { printf 'ok - %s\n' "$1"; }
 
 test_parent_state_and_cleanup() {
-    secure_tmpfs_create "yubi-test-parent" 1 false
+    local allow_disk=false
+    [[ "$_IS_MACOS" == "true" ]] && allow_disk=true
+    secure_tmpfs_create "yubi-test-parent" 1 "$allow_disk"
     local created="$SECURE_TMPFS_DIR"
     [[ -n "$created" && -d "$created" ]] || fail "allocator did not set parent state"
-    [[ "$SECURE_TMPFS_KIND" == *tmpfs ]] || fail "allocator did not verify tmpfs"
+    if [[ "$allow_disk" == "false" ]]; then
+        [[ "$SECURE_TMPFS_KIND" == *tmpfs ]] || fail "allocator did not verify tmpfs"
+    fi
     secure_tmpfs_cleanup
     [[ ! -e "$created" ]] || fail "cleanup left workspace behind"
     [[ -z "$SECURE_TMPFS_DIR" ]] || fail "cleanup did not reset state"
@@ -35,7 +39,7 @@ test_signal_cleanup() {
         trap 'exit 129' HUP
         trap 'exit 130' INT
         trap 'exit 143' TERM
-        secure_tmpfs_create "yubi-test-signal" 1 false
+        secure_tmpfs_create "yubi-test-signal" 1 "${ALLOW_DISK:-false}"
         printf '%s\n' "$SECURE_TMPFS_DIR" > "$state_file"
         while :; do sleep 1; done
     ) &
@@ -56,7 +60,12 @@ test_signal_cleanup() {
 test_interrupt_cleanup() {
     local state_file created
     state_file=$(mktemp)
-    ROOT_DIR="$ROOT_DIR" STATE_FILE="$state_file" timeout --signal=INT 1 bash -c '
+    if ! command -v timeout >/dev/null 2>&1; then
+        ok "INT cleanup (skipped: timeout unavailable)"
+        rm -f "$state_file"
+        return
+    fi
+    ROOT_DIR="$ROOT_DIR" STATE_FILE="$state_file" ALLOW_DISK="${ALLOW_DISK:-false}" timeout --signal=INT 1 bash -c '
         set -euo pipefail
         source "$ROOT_DIR/yubi-lib.sh"
         cleanup_child() {
@@ -67,7 +76,7 @@ test_interrupt_cleanup() {
         }
         trap cleanup_child EXIT
         trap "exit 130" INT
-        secure_tmpfs_create "yubi-test-int" 1 false
+        secure_tmpfs_create "yubi-test-int" 1 "$ALLOW_DISK"
         printf "%s\n" "$SECURE_TMPFS_DIR" > "$STATE_FILE"
         sleep 30
     ' >/dev/null 2>&1 || true
@@ -90,6 +99,11 @@ test_persistent_fallback_is_explicit() {
     _IS_MACOS="$saved_is_macos"
     ok "persistent fallback requires opt-in"
 }
+
+if [[ "$_IS_MACOS" == "true" ]]; then
+    ALLOW_DISK=true
+    export ALLOW_DISK
+fi
 
 test_parent_state_and_cleanup
 test_signal_cleanup HUP

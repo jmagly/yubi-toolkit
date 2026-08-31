@@ -304,6 +304,18 @@ All seed file management is automatic -- you never need to specify paths.
 | `configure-yubi.sh` | YubiKey programmer (PIV + OTP slots) |
 | `init-yubi.sh` | End-to-end pipeline (collect -> mux -> enrich -> program) |
 
+## Development and tests
+
+Run the non-hardware verification suite before submitting changes:
+
+```bash
+./tests/run.sh
+```
+
+The suite includes syntax and ShellCheck gates, lifecycle tests, and mocked
+YubiKey Manager fixtures. See [`tests/README.md`](tests/README.md) for the
+macOS Bash 3.2 gate and hardware-test boundary.
+
 ## Security Considerations
 
 - **OTP slots programmed with custom keys will NOT validate against YubiCloud.** This is intentional -- you're replacing Yubico's trust chain with your own. You must operate your own OTP validation server (e.g., [yubikey-val](https://developers.yubico.com/yubikey-val/)).

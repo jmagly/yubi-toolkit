@@ -382,7 +382,7 @@ print(h)
 " 2>&1)
 
     # Separate stderr dots from stdout hash
-    local mouse_hash
+    mouse_hash=""
     mouse_hash=$(echo "$MOUSE_ENTROPY" | tail -1)
     MOUSE_ENTROPY="$mouse_hash"
     printf "\n"
