@@ -216,7 +216,7 @@ shuffle_values() {
 }
 
 # =============================================================================
-# Secure file deletion
+# File removal
 # =============================================================================
 #
 # SSD + journaled filesystem (ext4, btrfs) means shred alone is insufficient:
@@ -224,15 +224,9 @@ shuffle_values() {
 #   - ext4 journal may hold data copies
 #   - LVM snapshots can preserve old data
 #
-# Strategy (defense in depth):
-#   1. Overwrite file content 3x with random data (defeats casual recovery)
-#   2. Overwrite once with zeros (clean slate)
-#   3. fsync to push to controller
-#   4. Unlink the file
-#   5. If root: fstrim the mount to TRIM freed SSD blocks
-#
-# For truly sensitive operations, use secure_tmpfs_create() which puts
-# files in RAM (tmpfs) so they never touch persistent storage.
+# Overwriting cannot guarantee sanitization on modern storage. Sensitive
+# plaintext belongs in a verified volatile workspace; this helper provides
+# best-effort removal only.
 
 secure_delete() {
     local file="$1"
@@ -242,39 +236,106 @@ secure_delete() {
         return 0
     fi
 
-    local filesize
-    filesize=$(file_size "$file")
-
-    # Pass 1-3: overwrite with random data
-    for pass in 1 2 3; do
-        dd if=/dev/urandom of="$file" bs=4096 count=$(( (filesize / 4096) + 1 )) \
-            conv=notrunc 2>/dev/null
-    done
-
-    # Pass 4: zero fill
-    dd if=/dev/zero of="$file" bs=4096 count=$(( (filesize / 4096) + 1 )) \
-        conv=notrunc 2>/dev/null
-
-    # Sync to push through caches to controller
-    sync "$file" 2>/dev/null
-
-    # Resolve mount point BEFORE deleting (df fails on deleted paths)
-    local mount_point=""
-    if [[ $EUID -eq 0 ]]; then
-        mount_point=$(df_target "$file")
-    fi
-
-    # Remove
     rm -f "$file"
 
-    # If we can fstrim (root, Linux only), TRIM freed SSD blocks.
-    # macOS APFS auto-TRIMs; no equivalent invocation needed.
-    if [[ $EUID -eq 0 && -n "$mount_point" ]] && command -v fstrim &>/dev/null; then
-        fstrim "$mount_point" 2>/dev/null || true
-    fi
-
-    [[ "$verbose" == "true" ]] && log_ok "Secure deleted: $(basename "$file")"
+    [[ "$verbose" == "true" ]] && log_ok "Removed: $(basename "$file") (sanitization is not guaranteed)"
     return 0
+}
+
+# =============================================================================
+# Authenticated persistent seed pools (age)
+# =============================================================================
+
+seed_pool_validate_file() {
+    local pool="$1"
+    [[ ! -L "$pool" ]] || { log_err "Refusing symlinked seed pool: $pool"; return 1; }
+    [[ -f "$pool" ]] || { log_err "Seed pool is not a regular file: $pool"; return 1; }
+    local perms
+    perms=$(file_perms "$pool")
+    [[ "$perms" == "600" ]] || { log_err "Seed pool permissions must be 600 (found $perms): $pool"; return 1; }
+}
+
+seed_pool_require_age() {
+    command -v age >/dev/null 2>&1 || {
+        log_err "age is required for persistent seed pools (https://age-encryption.org/)"
+        return 1
+    }
+}
+
+seed_pool_recipient() {
+    local recipient_file="${YUBI_SEED_RECIPIENT_FILE:-$SEED_DIR/recipient}"
+    if [[ -n "${YUBI_SEED_RECIPIENT:-}" ]]; then
+        printf '%s' "$YUBI_SEED_RECIPIENT"
+    elif [[ -f "$recipient_file" && ! -L "$recipient_file" ]]; then
+        IFS= read -r recipient < "$recipient_file"
+        printf '%s' "$recipient"
+    else
+        log_err "Set YUBI_SEED_RECIPIENT or create $recipient_file with one age recipient"
+        return 1
+    fi
+}
+
+seed_pool_identity() {
+    local identity="${YUBI_SEED_IDENTITY:-}"
+    [[ -n "$identity" ]] || {
+        log_err "Set YUBI_SEED_IDENTITY to an age identity file or plugin identity"
+        return 1
+    }
+    [[ ! -L "$identity" && -f "$identity" ]] || {
+        log_err "Age identity must be a regular, non-symlink file: $identity"
+        return 1
+    }
+    printf '%s' "$identity"
+}
+
+seed_pool_encrypt_atomic() {
+    local plaintext="$1" pool="$2"
+    seed_pool_require_age || return 1
+    [[ ! -L "$pool" ]] || { log_err "Refusing symlinked seed pool: $pool"; return 1; }
+    local recipient tmp
+    recipient=$(seed_pool_recipient) || return 1
+    tmp=$(mktemp "$(dirname "$pool")/.seed-pool.XXXXXX") || return 1
+    chmod 600 "$tmp"
+    if ! age -r "$recipient" < "$plaintext" > "$tmp"; then
+        rm -f "$tmp"
+        log_err "Seed-pool encryption failed"
+        return 1
+    fi
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$pool"
+}
+
+seed_pool_decrypt() {
+    local pool="$1" plaintext="$2" identity
+    seed_pool_require_age || return 1
+    seed_pool_validate_file "$pool" || return 1
+    identity=$(seed_pool_identity) || return 1
+    if ! age -d -i "$identity" < "$pool" > "$plaintext"; then
+        : > "$plaintext"
+        log_err "Seed-pool authentication or decryption failed"
+        return 1
+    fi
+    chmod 600 "$plaintext"
+}
+
+SEED_POOL_LOCK_DIR=""
+seed_pool_lock() {
+    local pool="$1"
+    SEED_POOL_LOCK_DIR="${pool}.lock"
+    if ! mkdir -m 700 "$SEED_POOL_LOCK_DIR" 2>/dev/null; then
+        log_err "Seed pool is locked by another operation: $pool"
+        SEED_POOL_LOCK_DIR=""
+        return 1
+    fi
+    printf '%s\n' "$$" > "$SEED_POOL_LOCK_DIR/pid"
+}
+
+seed_pool_unlock() {
+    if [[ -n "$SEED_POOL_LOCK_DIR" && -d "$SEED_POOL_LOCK_DIR" ]]; then
+        rm -f "$SEED_POOL_LOCK_DIR/pid"
+        rmdir "$SEED_POOL_LOCK_DIR"
+    fi
+    SEED_POOL_LOCK_DIR=""
 }
 
 # Securely delete all files in a directory, then remove the directory

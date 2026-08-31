@@ -14,7 +14,7 @@
 #   status                           Show seed pool status
 #   purge                            Securely delete empty/exhausted seed files
 #
-# All files are managed in ~/.yubikey-seeds/ — no file paths to remember.
+# Persistent pools are authenticated age ciphertext in ~/.yubikey-seeds/.
 #
 # Usage: ./yubi.sh <command> [args...]
 
@@ -28,6 +28,26 @@ source "$SCRIPT_DIR/yubi-lib.sh"
 # =============================================================================
 
 SEED_DIR="${HOME}/.yubikey-seeds"
+POOL_WORKSPACE_READY=false
+
+cleanup_pool_workspace() {
+    local status=$?
+    trap - EXIT
+    seed_pool_unlock || true
+    [[ "$POOL_WORKSPACE_READY" == true ]] && secure_tmpfs_cleanup || true
+    exit "$status"
+}
+
+ensure_pool_workspace() {
+    if [[ "$POOL_WORKSPACE_READY" != true ]]; then
+        trap cleanup_pool_workspace EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        secure_tmpfs_create "yubi-pool" 32 false
+        POOL_WORKSPACE_READY=true
+    fi
+}
 
 ensure_seed_dir() {
     if [[ ! -d "$SEED_DIR" ]]; then
@@ -36,10 +56,19 @@ ensure_seed_dir() {
     fi
 }
 
-# Generate a timestamped filename: bootstrap-20260308-143022.txt
+# Generate a timestamped encrypted-pool filename.
 seed_filename() {
     local prefix="$1"
-    printf '%s/%s-%s.txt' "$SEED_DIR" "$prefix" "$(date +%Y%m%d-%H%M%S)"
+    printf '%s/%s-%s.age' "$SEED_DIR" "$prefix" "$(date +%Y%m%d-%H%M%S)"
+}
+
+pool_count() {
+    local pool="$1" plain
+    ensure_pool_workspace
+    plain="$SECURE_TMPFS_DIR/count-$RANDOM"
+    seed_pool_decrypt "$pool" "$plain" || return 1
+    grep -c '.' "$plain" 2>/dev/null || true
+    : > "$plain"
 }
 
 # Find the active seed pool (most recent file with seeds remaining)
@@ -47,10 +76,10 @@ find_active_pool() {
     local best=""
     local best_count=0
 
-    for f in "$SEED_DIR"/*.txt; do
+    for f in "$SEED_DIR"/*.age; do
         [[ -f "$f" ]] || continue
         local count
-        count=$(grep -c '.' "$f" 2>/dev/null || true)
+        count=$(pool_count "$f") || continue
         if [[ "$count" -ge 5 ]]; then
             # Pick the most recently modified file with enough seeds
             best="$f"
@@ -208,32 +237,39 @@ case "$CMD" in
                     ;;
             esac
         done
-        outfile=$(seed_filename "bootstrap")
-        log_info "Seeds will be written to: $outfile"
+        poolfile=$(seed_filename "bootstrap")
+        ensure_pool_workspace
+        outfile="$SECURE_TMPFS_DIR/bootstrap.txt"
+        log_info "Seeds will be encrypted to: $poolfile"
 
         if [[ "$extra_arg" == "--mux" ]]; then
-            mux_tmp=$(seed_filename "mux-extra")
+            mux_tmp="$SECURE_TMPFS_DIR/mux-extra.txt"
             log_info "Collecting extra entropy via 2-device mux..."
             "$SCRIPT_DIR/yubi-mux.sh" "$mux_tmp"
             log_info "Muxed extra data: $mux_tmp"
             "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" "$mux_tmp" \
                 "${passthrough_args[@]+"${passthrough_args[@]}"}"
-            secure_delete "$mux_tmp" true
+            : > "$mux_tmp"
         elif [[ -n "$extra_arg" && -f "$extra_arg" ]]; then
             log_info "Extra entropy from: $extra_arg"
-            exec "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" "$extra_arg" \
+            "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" "$extra_arg" \
                 "${passthrough_args[@]+"${passthrough_args[@]}"}"
         else
-            exec "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" \
+            "$SCRIPT_DIR/bootstrap-entropy.sh" "$outfile" "$count" \
                 "${passthrough_args[@]+"${passthrough_args[@]}"}"
         fi
+        seed_pool_encrypt_atomic "$outfile" "$poolfile"
+        log_ok "Encrypted seed pool written: $poolfile"
         ;;
 
     mux)
         ensure_seed_dir
-        outfile=$(seed_filename "mux")
-        log_info "Compound passwords will be written to: $outfile"
-        exec "$SCRIPT_DIR/yubi-mux.sh" "$outfile"
+        poolfile=$(seed_filename "mux")
+        ensure_pool_workspace
+        outfile="$SECURE_TMPFS_DIR/mux.txt"
+        log_info "Compound passwords will be encrypted to: $poolfile"
+        "$SCRIPT_DIR/yubi-mux.sh" "$outfile"
+        seed_pool_encrypt_atomic "$outfile" "$poolfile"
         ;;
 
     enrich)
@@ -261,11 +297,16 @@ case "$CMD" in
                 exit 1
             fi
         fi
-        outfile=$(seed_filename "enriched")
+        poolfile=$(seed_filename "enriched")
+        ensure_pool_workspace
+        plain_in="$SECURE_TMPFS_DIR/enrich-input.txt"
+        outfile="$SECURE_TMPFS_DIR/enrich-output.txt"
+        seed_pool_decrypt "$infile" "$plain_in"
         log_info "Enriching: $infile"
-        log_info "Output:    $outfile"
-        exec "$SCRIPT_DIR/entropy-mix.sh" "$infile" "$outfile" \
+        log_info "Output:    $poolfile"
+        "$SCRIPT_DIR/entropy-mix.sh" "$plain_in" "$outfile" \
             "${passthrough_args[@]+"${passthrough_args[@]}"}"
+        seed_pool_encrypt_atomic "$outfile" "$poolfile"
         ;;
 
     # ----- Entropy collection (air-gapped workflows) -----
@@ -306,9 +347,22 @@ case "$CMD" in
             exit 1
         fi
 
-        seeds_left=$(grep -c '.' "$pool" || true)
+        seeds_left=$(pool_count "$pool")
         log_info "Using seed pool: $pool ($seeds_left seeds)"
-        exec "$SCRIPT_DIR/configure-yubi.sh" "$mode" "$serial" "$pool"
+        ensure_pool_workspace
+        plain_pool="$SECURE_TMPFS_DIR/configure-pool.txt"
+        seed_pool_lock "$pool"
+        pending_pool="${pool}.pending"
+        [[ ! -e "$pending_pool" ]] || { log_err "Pending pool already exists: $pending_pool"; exit 1; }
+        mv "$pool" "$pending_pool"
+        seed_pool_decrypt "$pending_pool" "$plain_pool"
+        "$SCRIPT_DIR/configure-yubi.sh" "$mode" "$serial" "$plain_pool"
+        remaining=$(grep -c '.' "$plain_pool" 2>/dev/null || true)
+        if [[ "$remaining" -gt 0 ]]; then
+            seed_pool_encrypt_atomic "$plain_pool" "$pool"
+        fi
+        rm -f "$pending_pool"
+        seed_pool_unlock
         ;;
 
     init)
@@ -388,10 +442,10 @@ case "$CMD" in
         echo ""
 
         found=false
-        for f in "$SEED_DIR"/*.txt; do
+        for f in "$SEED_DIR"/*.age; do
             [[ -f "$f" ]] || continue
             found=true
-            count=$(grep -c '.' "$f" 2>/dev/null || true)
+            count=$(pool_count "$f") || { log_warn "Unreadable pool: $(basename "$f")"; continue; }
             keys_possible=$(( count / 5 ))
             basename=$(basename "$f")
             mod_time=$(file_mtime "$f")
@@ -407,6 +461,11 @@ case "$CMD" in
                     "$basename" "$mod_time"
             fi
         done
+        for f in "$SEED_DIR"/*.age.pending; do
+            [[ -f "$f" ]] || continue
+            found=true
+            printf "  ${RED}%-40s${RST}  pending recovery; not reusable\n" "$(basename "$f")"
+        done
 
         if [[ "$found" == "false" ]]; then
             log_info "No seed files yet."
@@ -417,8 +476,8 @@ case "$CMD" in
             echo ""
             pool=$(find_active_pool) || true
             if [[ -n "$pool" ]]; then
-                pool_count=$(grep -c '.' "$pool" || true)
-                log_ok "Active pool: $(basename "$pool") ($pool_count seeds, $(( pool_count / 5 )) keys)"
+                active_count=$(pool_count "$pool")
+                log_ok "Active pool: $(basename "$pool") ($active_count seeds, $(( active_count / 5 )) keys)"
             else
                 log_warn "No pool has enough seeds (need 5). Generate more."
             fi
@@ -431,9 +490,9 @@ case "$CMD" in
         echo ""
         log_info "Scanning $SEED_DIR for empty/exhausted files..."
         purged=0
-        for f in "$SEED_DIR"/*.txt; do
+        for f in "$SEED_DIR"/*.age; do
             [[ -f "$f" ]] || continue
-            count=$(grep -c '.' "$f" 2>/dev/null || true)
+            count=$(pool_count "$f") || continue
             if [[ "$count" -eq 0 ]]; then
                 secure_delete "$f" true
                 purged=$(( purged + 1 ))

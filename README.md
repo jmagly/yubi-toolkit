@@ -252,17 +252,33 @@ When combining passwords from 2 YubiKeys:
 3. Random concatenation order per pair (D1+D2 or D2+D1)
 4. Each compound password is cryptographically independent
 
-### Secure Deletion
+### Seed storage and removal
 
-Sensitive files are handled with defense-in-depth:
+Persistent seed pools use the authenticated [age](https://age-encryption.org/)
+file format. Install `age`, create an identity on separate protected storage,
+and place only its public recipient in the managed directory:
+
+```bash
+age-keygen -o /protected/location/yubi-seed-identity.txt
+mkdir -p ~/.yubikey-seeds && chmod 700 ~/.yubikey-seeds
+age-keygen -y /protected/location/yubi-seed-identity.txt > ~/.yubikey-seeds/recipient
+chmod 600 ~/.yubikey-seeds/recipient
+export YUBI_SEED_IDENTITY=/protected/location/yubi-seed-identity.txt
+```
+
+Back up the identity separately: losing it makes every pool unrecoverable.
+Do not store the identity beside the ciphertext. An age plugin identity may be
+used when the installed age version supports that plugin.
 
 - **Volatile workspace** (`tmpfs`): `init` uses a verified Linux tmpfs, including `/dev/shm` for unprivileged users. tmpfs pages can be swapped; disable or encrypt swap when the threat model forbids disk exposure. Persistent fallback requires the explicit `--allow-disk-workspace` risk override.
-- **Disk files**: 3-pass random overwrite + zero pass + `sync` + unlink + `fstrim` (SSD, Linux root). On macOS, APFS auto-TRIMs and encrypts at rest, so `fstrim` is a no-op.
-- **Consumed seeds**: Removed from pool file atomically after successful programming
-- **Empty pool files**: Auto-detected and securely wiped by `purge`
+- **Persistent pools**: Authenticated ciphertext, mode 600, replaced atomically only after successful programming
+- **Interrupted programming**: The active ciphertext is first moved to a `.pending` quarantine. A failure leaves it unavailable for reuse; `status` reports the recovery state.
+- **Empty pool files**: Removed by `purge`
 - **Entropy files**: Created with mode 600 (owner-only read/write)
 
-Note: `shred` alone is insufficient on SSD/NVMe due to FTL wear leveling and filesystem journaling. The multi-pass approach provides defense in depth, and `tmpfs` (where available) avoids the problem entirely for ephemeral data.
+Deletion does not guarantee sanitization on flash, copy-on-write, journaled,
+snapshotted, or network storage. The design avoids persistent plaintext instead
+of claiming that overwrite or TRIM can reliably erase it.
 
 ### Password Input Security
 
@@ -277,9 +293,10 @@ All password entry uses silent terminal input (`read -rs`). After entry, a maske
 
 ```
 ~/.yubikey-seeds/                       # Managed seed directory (mode 700)
-  bootstrap-20260308-143022.txt         # Timestamped seed files
-  enriched-20260308-144500.txt          # Enriched seeds
-  mux-20260308-150000.txt              # Muxed compound passwords
+  recipient                             # Public age recipient only
+  bootstrap-20260308-143022.age         # Authenticated encrypted pool
+  enriched-20260308-144500.age          # Authenticated encrypted pool
+  mux-20260308-150000.age               # Authenticated encrypted pool
 ```
 
 Entropy collection files are stored wherever you specify (not in the seed directory):
@@ -295,7 +312,7 @@ All seed file management is automatic -- you never need to specify paths.
 | Script | Purpose |
 |--------|---------|
 | `yubi.sh` | Unified entry point -- all commands go through here |
-| `yubi-lib.sh` | Shared library (logging, secure delete, tmpfs, entropy file I/O) |
+| `yubi-lib.sh` | Shared library (logging, age pools, tmpfs, entropy file I/O) |
 | `bootstrap-entropy.sh` | Interactive seed generation for new users |
 | `entropy-mix.sh` | Batch HKDF-SHA512 enrichment of password lists |
 | `entropy-collect.sh` | Standalone external entropy collection for air-gapped workflows |
