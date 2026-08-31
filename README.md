@@ -136,7 +136,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 | `yubi.sh info [serial]` | Detailed info for a specific key |
 | `yubi.sh status` | Show seed pool status |
 | `yubi.sh doctor [serial]` | Machine-readable dependency and device support report (`--json`) |
-| `yubi.sh purge` | Securely delete empty/exhausted seed files |
+| `yubi.sh purge` | Remove empty/exhausted encrypted pool files |
 
 ### Air-Gapped Flags
 
@@ -271,6 +271,26 @@ Back up the identity separately: losing it makes every pool unrecoverable.
 Do not store the identity beside the ciphertext. An age plugin identity may be
 used when the installed age version supports that plugin.
 
+Provisioning uses the public Yubico Python API, pinned in
+`requirements-programmer.in`. Install that bounded dependency in the runtime
+environment before programming:
+
+```bash
+python3 -m pip install -r requirements-programmer.in
+```
+
+Generated values are not printed. To retain the PIV recovery values, explicitly
+select an encrypted destination and recipient:
+
+```bash
+./yubi.sh configure mixed 12345678 \
+  --recovery-file /protected/recovery/yubikey-12345678.age \
+  --recovery-recipient age1example...
+```
+
+The recovery file is created mode 600 and replaced atomically. Without these
+two options, recovery values are intentionally discarded after programming.
+
 - **Volatile workspace** (`tmpfs`): `init` uses a verified Linux tmpfs, including `/dev/shm` for unprivileged users. tmpfs pages can be swapped; disable or encrypt swap when the threat model forbids disk exposure. Persistent fallback requires the explicit `--allow-disk-workspace` risk override.
 - **Persistent pools**: Authenticated ciphertext, mode 600, replaced atomically only after successful programming
 - **Interrupted programming**: The active ciphertext is first moved to a `.pending` quarantine. A failure leaves it unavailable for reuse; `status` reports the recovery state.
@@ -352,7 +372,7 @@ macOS Bash 3.2 gate and hardware-test boundary.
 ## Security Considerations
 
 - **OTP slots programmed with custom keys will NOT validate against YubiCloud.** This is intentional -- you're replacing Yubico's trust chain with your own. You must operate your own OTP validation server (e.g., [yubikey-val](https://developers.yubico.com/yubikey-val/)).
-- **Record your PIN, PUK, and management key immediately** after programming. They cannot be recovered, only reset to factory defaults. Clear terminal scrollback after recording.
+- **Recovery output is opt-in**: use `--recovery-file` with an age recipient when invoking the configuration script. Generated values are never printed; without an encrypted recovery sink they are not retained.
 - **PIV auto-reset**: If a key was previously initialized, `configure` will offer to reset PIV to factory defaults before reprogramming.
 - **AES256 management key**: Automatically used on firmware 5.4.2+ (NIST deprecated TDES post-2023). Falls back to TDES on older keys.
 - **FIDO2 PIN**: Set automatically during initialization using the same PIN as PIV.
@@ -361,7 +381,7 @@ macOS Bash 3.2 gate and hardware-test boundary.
 - **OpenSSL 3.x required**: The `openssl kdf` command used for HKDF is not available in OpenSSL 1.x (Ubuntu 20.04 and earlier). Scripts check this at startup.
 - **Entropy files are sensitive**: A collected entropy file reduces unpredictability if leaked alongside derived seeds. Treat them with the same care as seed files. Files are created mode 600 by default.
 - **External entropy is supplementary**: On an air-gapped machine, local sources (CPU RNG, thermal, jitter, keyboard, mouse) remain the primary entropy. Pre-collected external entropy improves the salt but is not required.
-- **Known limitation**: `ykman` receives credentials as CLI arguments, briefly visible in `/proc/PID/cmdline`. Run on a trusted single-user system.
+- **Programming transport**: generated values are passed to the pinned public Yubico Python API through a mode-0600 descriptor on stdin. They are not placed in process arguments or exported environment variables.
 
 ## Troubleshooting
 

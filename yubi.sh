@@ -13,7 +13,7 @@
 #   info        [serial]             Detailed info for a specific key
 #   status                           Show seed pool status
 #   doctor      [serial]             Report dependency and device support
-#   purge                            Securely delete empty/exhausted seed files
+#   purge                            Remove empty/exhausted encrypted pool files
 #
 # Persistent pools are authenticated age ciphertext in ~/.yubikey-seeds/.
 #
@@ -160,7 +160,7 @@ BANNER
     printf "  ${GRN}info${RST}             [serial]              Detailed info (auto-detects single key)\n"
     printf "  ${GRN}status${RST}                                 Show seed pool status\n"
     printf "  ${GRN}doctor${RST}           [serial]              Dependency and capability report\n"
-    printf "  ${GRN}purge${RST}                                  Securely wipe empty/exhausted seed files\n"
+    printf "  ${GRN}purge${RST}                                  Remove empty/exhausted encrypted pools\n"
     echo ""
     printf "${BLD}Modes:${RST}  otp | static | mixed\n"
     echo ""
@@ -331,11 +331,18 @@ case "$CMD" in
         ensure_seed_dir
         require_ykman
         if [[ $# -lt 1 ]]; then
-            log_err "Usage: yubi.sh configure <mode> [serial]"
+            log_err "Usage: yubi.sh configure <mode> [serial] [--recovery-file PATH --recovery-recipient AGE_RECIPIENT]"
             exit 1
         fi
-        mode="$1"
-        serial="${2:-}"
+        mode="$1"; shift
+        serial=""
+        configure_args=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --recovery-file|--recovery-recipient) configure_args+=("$1" "$2"); shift 2 ;;
+                *) [[ -z "$serial" ]] || { log_err "Unexpected argument: $1"; exit 1; }; serial="$1"; shift ;;
+            esac
+        done
 
         if [[ -z "$serial" ]]; then
             serial=$(detect_serial)
@@ -358,7 +365,8 @@ case "$CMD" in
         [[ ! -e "$pending_pool" ]] || { log_err "Pending pool already exists: $pending_pool"; exit 1; }
         mv "$pool" "$pending_pool"
         seed_pool_decrypt "$pending_pool" "$plain_pool"
-        "$SCRIPT_DIR/configure-yubi.sh" "$mode" "$serial" "$plain_pool"
+        "$SCRIPT_DIR/configure-yubi.sh" "$mode" "$serial" "$plain_pool" \
+            "${configure_args[@]+"${configure_args[@]}"}"
         remaining=$(grep -c '.' "$plain_pool" 2>/dev/null || true)
         if [[ "$remaining" -gt 0 ]]; then
             seed_pool_encrypt_atomic "$plain_pool" "$pool"
@@ -381,6 +389,7 @@ case "$CMD" in
                 --no-external)  passthrough_args+=(--no-external); shift ;;
                 --entropy-file) passthrough_args+=(--entropy-file "$2"); shift 2 ;;
                 --allow-disk-workspace) passthrough_args+=(--allow-disk-workspace); shift ;;
+                --recovery-file|--recovery-recipient) passthrough_args+=("$1" "$2"); shift 2 ;;
                 *)
                     if [[ -z "$serial" ]]; then
                         serial="$1"

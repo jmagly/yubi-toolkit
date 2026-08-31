@@ -9,7 +9,7 @@
 #   - OTP Slot 2     (Yubico OTP or static password)
 #
 # Consumes 5 lines from input data file (randomly selected, never reused).
-# Outputs the derived PIN on success — record it securely.
+# Generated credential values are never printed; recovery output is opt-in.
 #
 # Usage: ./configure-yubi.sh <MODE> <SERIAL> <INPUTDATA>
 #   MODE:      "otp"    = both OTP slots get Yubico OTP credentials
@@ -37,11 +37,6 @@ PIV_PUK_LEN=8        # PIV PUK: 8 alphanumeric chars
 LINES_REQUIRED=5     # Total entropy lines consumed per key
 # PIV_MGMT_KEY_LEN and MGMT_KEY_ALGO set after firmware detection
 
-# Factory defaults (used to authenticate before changing)
-FACTORY_PIN="123456"
-FACTORY_PUK="12345678"
-FACTORY_MGMT_KEY="010203040506070801020304050607080102030405060708"
-
 # =============================================================================
 # Arguments
 # =============================================================================
@@ -63,6 +58,22 @@ fi
 MODE="$1"
 SERIAL="$2"
 INPUT_FILE="$3"
+shift 3
+RECOVERY_FILE=""
+RECOVERY_RECIPIENT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --recovery-file) RECOVERY_FILE="$2"; shift 2 ;;
+        --recovery-recipient) RECOVERY_RECIPIENT="$2"; shift 2 ;;
+        *) log_err "Unknown option: $1"; exit 1 ;;
+    esac
+done
+if [[ -n "$RECOVERY_FILE" || -n "$RECOVERY_RECIPIENT" ]]; then
+    [[ -n "$RECOVERY_FILE" && -n "$RECOVERY_RECIPIENT" ]] || {
+        log_err "Recovery output requires both --recovery-file and --recovery-recipient"
+        exit 1
+    }
+fi
 
 validate_mode "$MODE"
 validate_serial "$SERIAL"
@@ -282,11 +293,9 @@ slot2_desc=""
 if [[ "$slot1_mode" == "otp" ]]; then
     s1_aes=$(hkdf_derive_hex "$raw_slot1" "yubiotp-aes-key-slot1" "$OTP_AES_KEY_LEN")
     s1_pid=$(hkdf_derive_hex "$raw_slot1" "yubiotp-private-id-slot1" "$OTP_PRIVATE_ID_LEN")
-    slot1_desc="Yubico OTP  AES ${s1_aes:0:8}...${s1_aes: -4}  pid ${s1_pid}"
+    slot1_desc="Yubico OTP credential"
 else
-    s1_pw="${raw_slot1:0:$MAX_STATIC_LEN}"
-    [[ ${#raw_slot1} -gt $MAX_STATIC_LEN ]] && \
-        log_warn "Slot 1: truncated from ${#raw_slot1} to $MAX_STATIC_LEN chars"
+    s1_pw=$(hex_to_alphanum "$(hkdf_derive_hex "$raw_slot1" "static-password-slot1" "$MAX_STATIC_LEN")" "$MAX_STATIC_LEN")
     slot1_desc="static password (US layout, ${#s1_pw} chars)"
 fi
 
@@ -294,16 +303,14 @@ fi
 if [[ "$slot2_mode" == "otp" ]]; then
     s2_aes=$(hkdf_derive_hex "$raw_slot2" "yubiotp-aes-key-slot2" "$OTP_AES_KEY_LEN")
     s2_pid=$(hkdf_derive_hex "$raw_slot2" "yubiotp-private-id-slot2" "$OTP_PRIVATE_ID_LEN")
-    slot2_desc="Yubico OTP  AES ${s2_aes:0:8}...${s2_aes: -4}  pid ${s2_pid}"
+    slot2_desc="Yubico OTP credential"
 else
-    s2_pw="${raw_slot2:0:$MAX_STATIC_LEN}"
-    [[ ${#raw_slot2} -gt $MAX_STATIC_LEN ]] && \
-        log_warn "Slot 2: truncated from ${#raw_slot2} to $MAX_STATIC_LEN chars"
+    s2_pw=$(hex_to_alphanum "$(hkdf_derive_hex "$raw_slot2" "static-password-slot2" "$MAX_STATIC_LEN")" "$MAX_STATIC_LEN")
     slot2_desc="static password (US layout, ${#s2_pw} chars)"
 fi
 
 # =============================================================================
-# Confirmation gate
+# Secret-safe programming adapter
 # =============================================================================
 
 echo ""
@@ -311,16 +318,10 @@ log_info "=== CONFIGURATION PLAN ==="
 log_info "Target:      YubiKey $SERIAL"
 log_info "OTP Slot 1:  ${slot1_desc}"
 log_info "OTP Slot 2:  ${slot2_desc}"
-log_info "PIV PIN:     ${derived_pin:0:2}******  (8 numeric digits)"
-log_info "PIV PUK:     ${derived_puk:0:2}******  (8 alphanumeric chars)"
-log_info "PIV Mgmt:    ${derived_mgmt:0:8}...${derived_mgmt: -4}  (${PIV_MGMT_KEY_LEN}-byte $MGMT_KEY_ALGO)"
-log_info "Input:       $INPUT_FILE (consuming ${LINES_REQUIRED} lines)"
+log_info "PIV:         unique PIN, PUK, and ${MGMT_KEY_ALGO} management key"
+log_info "Recovery:    ${RECOVERY_FILE:-disabled}"
 echo ""
-if [[ "$slot1_mode" == "otp" || "$slot2_mode" == "otp" ]]; then
-    printf "${YLW}OTP slots will REPLACE factory seed — will not validate against YubiCloud.${RST}\n"
-fi
-printf "${YLW}PIV PIN, PUK, and management key will REPLACE factory defaults.${RST}\n"
-printf "${YLW}This is a full key initialization. All factory secrets will be overwritten.${RST}\n"
+printf "${YLW}This operation replaces the configured PIV and OTP credentials.${RST}\n"
 printf "Type YES to proceed: "
 read -r confirm
 if [[ "$confirm" != "YES" ]]; then
@@ -328,149 +329,48 @@ if [[ "$confirm" != "YES" ]]; then
     exit 0
 fi
 
-# =============================================================================
-# Phase 1: PIV initialization (PIN, PUK, Management Key)
-# =============================================================================
-
-echo ""
-log_info "=== Phase 1: PIV credentials ==="
-
-# Order matters: change management key first (needs factory mgmt key),
-# then PUK (needs factory PUK), then PIN (needs factory PIN).
-
-# Try with factory defaults first; if that fails, offer PIV reset
-piv_reset_and_retry() {
-    log_warn "PIV credentials don't match factory defaults — key was previously initialized"
-    echo ""
-    printf "${YLW}Reset PIV to factory defaults and re-initialize? (YES/no): ${RST}"
-    read -r reset_confirm
-    if [[ "$reset_confirm" != "YES" ]]; then
-        log_info "Aborted. Reset manually with: ykman -d $SERIAL piv reset"
-        exit 1
-    fi
-    log_info "Resetting PIV application..."
-    if ! ykman -d "$SERIAL" piv reset --force; then
-        log_err "PIV reset FAILED"
-        exit 1
-    fi
-    log_ok "PIV reset to factory defaults"
-    echo ""
-}
-
-# Build management key change args (factory key is always TDES)
-mgmt_change_args=(
-    -d "$SERIAL" piv access change-management-key
-    --management-key "$FACTORY_MGMT_KEY"
-    --new-management-key "$derived_mgmt"
-    --force
-)
-# Set algorithm for the NEW key (factory auth is auto-detected by ykman)
-if [[ "$MGMT_KEY_ALGO" == "AES256" ]]; then
-    mgmt_change_args+=(--algorithm AES256)
-fi
-
-log_info "Changing management key ($MGMT_KEY_ALGO)..."
-if ! ykman "${mgmt_change_args[@]}" 2>/dev/null; then
-    piv_reset_and_retry
-    # Retry after reset — factory defaults are restored
-    log_info "Retrying management key change..."
-    if ! ykman "${mgmt_change_args[@]}"; then
-        log_err "Management key change FAILED even after reset"
-        exit 1
-    fi
-fi
-log_ok "Management key replaced"
-
-log_info "Changing PUK..."
-if ! ykman -d "$SERIAL" piv access change-puk \
-    --puk "$FACTORY_PUK" \
-    --new-puk "$derived_puk"; then
-    log_err "PUK change FAILED"
-    log_err "WARNING: Management key was already changed. Input file NOT modified."
-    exit 1
-fi
-log_ok "PUK replaced"
-
-log_info "Changing PIN..."
-if ! ykman -d "$SERIAL" piv access change-pin \
-    --pin "$FACTORY_PIN" \
-    --new-pin "$derived_pin"; then
-    log_err "PIN change FAILED"
-    log_err "WARNING: Management key and PUK were already changed. Input file NOT modified."
-    exit 1
-fi
-log_ok "PIN replaced"
-
-# =============================================================================
-# Phase 2: OTP slot programming
-# =============================================================================
-
-echo ""
-log_info "=== Phase 2: OTP slots ==="
-
-program_otp_slot() {
-    local slot_num="$1" aes_key="$2" private_id="$3"
-    ykman -d "$SERIAL" otp yubiotp "$slot_num" \
-        --key "$aes_key" \
-        --private-id "$private_id" \
-        --serial-public-id \
-        --force
-}
-
-program_static_slot() {
-    local slot_num="$1" password="$2"
-    ykman -d "$SERIAL" otp static "$slot_num" "$password" \
-        --keyboard-layout US --no-enter --force
-}
-
-log_info "Programming slot 1 ($slot1_mode)..."
+CONFIGURE_TMPFILE=$(mktemp "$(dirname "$INPUT_FILE")/.program-descriptor.XXXXXX")
+descriptor="$CONFIGURE_TMPFILE"
+chmod 600 "$descriptor"
 if [[ "$slot1_mode" == "otp" ]]; then
-    if ! program_otp_slot 1 "$s1_aes" "$s1_pid"; then
-        log_err "Slot 1 programming FAILED — PIV was already changed. Input file NOT modified."
-        exit 1
-    fi
+    slot1_json=$(printf '{"kind":"yubiotp","aes_key":"%s","private_id":"%s"}' "$s1_aes" "$s1_pid")
 else
-    if ! program_static_slot 1 "$s1_pw"; then
-        log_err "Slot 1 programming FAILED — PIV was already changed. Input file NOT modified."
-        exit 1
-    fi
+    slot1_json=$(printf '{"kind":"static","password":"%s"}' "$s1_pw")
 fi
-log_ok "Slot 1 programmed ($slot1_mode)"
-
-log_info "Programming slot 2 ($slot2_mode)..."
 if [[ "$slot2_mode" == "otp" ]]; then
-    if ! program_otp_slot 2 "$s2_aes" "$s2_pid"; then
-        log_err "Slot 2 programming FAILED — PIV + slot 1 already changed. Input file NOT modified."
+    slot2_json=$(printf '{"kind":"yubiotp","aes_key":"%s","private_id":"%s"}' "$s2_aes" "$s2_pid")
+else
+    slot2_json=$(printf '{"kind":"static","password":"%s"}' "$s2_pw")
+fi
+printf '{"serial":%s,"management_algorithm":"%s","management_key":"%s","pin":"%s","puk":"%s","slot1":%s,"slot2":%s,"fido_pin":"%s"}\n' \
+    "$SERIAL" "$MGMT_KEY_ALGO" "$derived_mgmt" "$derived_pin" "$derived_puk" \
+    "$slot1_json" "$slot2_json" "$derived_pin" > "$descriptor"
+
+if [[ -n "$RECOVERY_FILE" ]]; then
+    command -v age >/dev/null 2>&1 || { log_err "age is required for recovery output"; exit 1; }
+    recovery_tmp="${RECOVERY_FILE}.tmp.$$"
+    umask 077
+    if ! age -r "$RECOVERY_RECIPIENT" < "$descriptor" > "$recovery_tmp"; then
+        rm -f "$recovery_tmp"
+        log_err "Recovery encryption failed; device was not modified"
         exit 1
     fi
-else
-    if ! program_static_slot 2 "$s2_pw"; then
-        log_err "Slot 2 programming FAILED — PIV + slot 1 already changed. Input file NOT modified."
-        exit 1
-    fi
-fi
-log_ok "Slot 2 programmed ($slot2_mode)"
-
-# =============================================================================
-# Phase 2B: FIDO2 PIN initialization
-# =============================================================================
-
-echo ""
-log_info "=== Phase 2B: FIDO2 PIN ==="
-
-# Reuse PIV PIN for FIDO2 — separate applications, operationally simpler
-log_info "Setting FIDO2 PIN (same as PIV PIN for operational simplicity)..."
-if ykman -d "$SERIAL" fido access change-pin --new-pin "$derived_pin" 2>/dev/null; then
-    log_ok "FIDO2 PIN set"
-elif ykman -d "$SERIAL" fido access change-pin \
-    --pin "$derived_pin" --new-pin "$derived_pin" 2>/dev/null; then
-    # Already has this PIN set — no-op
-    log_ok "FIDO2 PIN already matches"
-else
-    # FIDO2 PIN may already be set to something else, or FIDO2 may be unavailable
-    log_warn "FIDO2 PIN not set — may require manual reset: ykman -d $SERIAL fido reset"
+    chmod 600 "$recovery_tmp"
+    mv -f "$recovery_tmp" "$RECOVERY_FILE"
+    log_ok "Encrypted recovery record written"
 fi
 
+log_info "Programming PIV, OTP, and FIDO2 through the Yubico API adapter..."
+if ! adapter_result=$(python3 "$SCRIPT_DIR/yubikey-programmer.py" < "$descriptor"); then
+    log_err "Programming adapter failed; generated values were not displayed"
+    exit 1
+fi
+[[ "$adapter_result" == *'"ok": true'* ]] || { log_err "Programming adapter returned an invalid result"; exit 1; }
+log_ok "Programming adapter completed"
+
+: > "$descriptor"
+rm -f "$descriptor"
+CONFIGURE_TMPFILE=""
 # =============================================================================
 # Phase 3: Consume entropy lines from input file
 # =============================================================================
@@ -503,7 +403,7 @@ CONFIGURE_TMPFILE=""  # Successfully moved — no cleanup needed
 chmod 600 "$INPUT_FILE"
 log_ok "Input file updated — $LINES_REQUIRED lines consumed"
 
-# If file is now empty, securely remove it
+# If the volatile file is now empty, remove it.
 remaining_check=$(grep -c '.' "$INPUT_FILE" 2>/dev/null || true)
 if [[ "$remaining_check" -eq 0 ]]; then
     secure_delete "$INPUT_FILE" true
@@ -521,7 +421,7 @@ if [[ -f "$INPUT_FILE" ]]; then
     remaining=$(grep -c '.' "$INPUT_FILE" || true)
     log_info "Keys remaining in $INPUT_FILE: $remaining"
 else
-    log_info "Seed file was fully consumed and securely deleted"
+    log_info "Seed file was fully consumed and removed"
 fi
 
 echo ""
@@ -530,15 +430,13 @@ log_ok " YubiKey $SERIAL — fully initialized"
 log_ok "============================================"
 log_ok "OTP Slot 1:  ${slot1_desc}"
 log_ok "OTP Slot 2:  ${slot2_desc}"
-log_ok "PIV Mgmt:    $derived_mgmt  ($MGMT_KEY_ALGO)"
-log_ok "PIV PUK:     $derived_puk"
-log_ok "FIDO2 PIN:   (same as PIV PIN)"
-echo ""
-printf "${GRN}${GRN}[PIN]${RST}  ${GRN}%s${RST}\n" "$derived_pin"
-echo ""
-log_warn "Record the PIN, PUK, and management key securely NOW."
-log_warn "They cannot be recovered — only reset to factory defaults."
-log_warn "Clear terminal scrollback after recording (secrets are visible above)."
+log_ok "PIV credentials: programmed (values not displayed)"
+log_ok "FIDO2 PIN:       programmed (value not displayed)"
+if [[ -n "$RECOVERY_FILE" ]]; then
+    log_ok "Recovery record: encrypted operator-selected sink"
+else
+    log_warn "Recovery output was disabled; generated credentials were not retained"
+fi
 if [[ "$slot1_mode" == "otp" || "$slot2_mode" == "otp" ]]; then
     log_warn "OTP slot(s) will NOT validate against YubiCloud (factory trust removed)."
 fi

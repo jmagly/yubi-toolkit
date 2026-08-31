@@ -41,6 +41,9 @@ Options:
   --no-external         Skip external API calls (local entropy only)
   --allow-disk-workspace
                         Permit plaintext temporary files on persistent storage
+  --recovery-file PATH  Write an encrypted recovery record
+  --recovery-recipient RECIPIENT
+                        age recipient for the recovery record
 
 You will be prompted to tap 2 source YubiKeys for entropy input.
 USAGE
@@ -53,18 +56,30 @@ LINES_REQUIRED=5
 NO_EXTERNAL=false
 ENTROPY_FILE_PATH=""
 ALLOW_DISK_WORKSPACE=false
+RECOVERY_FILE=""
+RECOVERY_RECIPIENT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-external) NO_EXTERNAL=true; shift ;;
         --entropy-file) ENTROPY_FILE_PATH="$2"; shift 2 ;;
         --allow-disk-workspace) ALLOW_DISK_WORKSPACE=true; shift ;;
+        --recovery-file) RECOVERY_FILE="$2"; shift 2 ;;
+        --recovery-recipient) RECOVERY_RECIPIENT="$2"; shift 2 ;;
         *) log_err "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 validate_mode "$MODE"
 validate_serial "$SERIAL"
+recovery_args=()
+if [[ -n "$RECOVERY_FILE" || -n "$RECOVERY_RECIPIENT" ]]; then
+    [[ -n "$RECOVERY_FILE" && -n "$RECOVERY_RECIPIENT" ]] || {
+        log_err "Recovery output requires both file and recipient"
+        exit 1
+    }
+    recovery_args=(--recovery-file "$RECOVERY_FILE" --recovery-recipient "$RECOVERY_RECIPIENT")
+fi
 
 # --- Verify scripts exist ---
 for script in yubi-mux.sh entropy-mix.sh configure-yubi.sh; do
@@ -521,7 +536,8 @@ log_info "============================================"
 
 # configure-yubi.sh will pick randomly from the file, but we only have
 # exactly 5 lines so all will be used. Pass through to it.
-"$SCRIPT_DIR/configure-yubi.sh" "$MODE" "$SERIAL" "$ENRICHED_FILE"
+"$SCRIPT_DIR/configure-yubi.sh" "$MODE" "$SERIAL" "$ENRICHED_FILE" \
+    "${recovery_args[@]+"${recovery_args[@]}"}"
 
 # =============================================================================
 # Step 6: Clean up mux pool (remove used compound passwords)
@@ -531,5 +547,5 @@ log_info "============================================"
 # Nothing persists to disk after this script exits.
 
 echo ""
-log_ok "Working files will be securely wiped on exit."
+log_ok "Volatile working files will be cleared on exit."
 log_info "init-yubi complete."
