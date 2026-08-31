@@ -1,7 +1,5 @@
 # YubiKey Entropy Toolkit
 
-[![Built With AIWG](https://aiwg.io/assets/badges/built-with-aiwg-dark.png)](https://aiwg.io)
-
 A Bash toolkit for generating CSPRNG-rooted credential seeds and provisioning a named YubiKey application scope with operator-controlled values.
 
 ## Why?
@@ -40,8 +38,9 @@ chmod +x *.sh
 ./yubi.sh bootstrap
 
 # Initialize a YubiKey with generated seeds
-./yubi.sh configure otp           # auto-detect single key
-./yubi.sh configure otp 35276256  # specify serial
+./yubi.sh doctor --json           # verify tools and device support first
+./yubi.sh configure otp --derivation-profile v2
+./yubi.sh configure otp 35276256 --derivation-profile v2
 
 # Or do everything in one shot (requires 2 source keys)
 ./yubi.sh init otp
@@ -53,9 +52,10 @@ The toolkit runs on **Linux** and **macOS** (Apple Silicon and Intel). Pick your
 
 | Component | Linux | macOS |
 |-----------|-------|-------|
-| `bash` | 4.0+ (default on modern distros) | 3.2.57+ (Apple's stock `/bin/bash` works -- no upgrade needed) |
+| `bash` | 3.2.57+ (4.x/5.x are also tested) | 3.2.57+ (Apple's stock `/bin/bash` works -- no upgrade needed) |
 | `openssl` | 3.x (`openssl kdf` subcommand required) | 3.x via Homebrew (Apple's `/usr/bin/openssl` is LibreSSL and won't work) |
-| `ykman` | YubiKey Manager CLI | YubiKey Manager CLI |
+| `ykman` | YubiKey Manager 5 (`>=5.5.1,<6`); 5.9.2 recommended | YubiKey Manager 5 (`>=5.5.1,<6`); 5.9.2 recommended |
+| `age` | encrypted seed pools and recovery output | encrypted seed pools and recovery output |
 | `curl` | yes | yes (preinstalled) |
 | `python3` | for keyboard timing and mouse capture | for keyboard timing (preinstalled) |
 | Thermal sensors | `lm-sensors` (optional, sysfs always works) | not needed -- uses `sysctl`/`ioreg` automatically |
@@ -66,19 +66,19 @@ The scripts auto-detect the platform at runtime. There are no platform-specific 
 ### Install dependencies (Debian/Ubuntu)
 
 ```bash
-sudo apt install yubikey-manager openssl curl lm-sensors python3
+sudo apt install yubikey-manager openssl curl lm-sensors python3 age
 ```
 
 ### Install dependencies (Fedora/RHEL)
 
 ```bash
-sudo dnf install yubikey-manager openssl curl lm_sensors python3
+sudo dnf install yubikey-manager openssl curl lm_sensors python3 age
 ```
 
 ### Install dependencies (Arch Linux)
 
 ```bash
-sudo pacman -S yubikey-manager openssl curl lm_sensors python
+sudo pacman -S yubikey-manager openssl curl lm_sensors python age
 ```
 
 ### Install dependencies (macOS)
@@ -86,10 +86,20 @@ sudo pacman -S yubikey-manager openssl curl lm_sensors python
 You need [Homebrew](https://brew.sh) installed first. Then:
 
 ```bash
-brew install openssl@3 ykman
+brew install openssl@3 ykman age
 ```
 
-That's it. `bash`, `python3`, and `curl` ship with macOS. The toolkit automatically prepends `/opt/homebrew/opt/openssl@3/bin` (and `/usr/local/opt/openssl@3/bin` on Intel Macs) to `PATH` when sourced, so `openssl` resolves to Homebrew's OpenSSL 3.x rather than Apple's LibreSSL.
+`bash`, `python3`, and `curl` ship with macOS. The toolkit automatically prepends `/opt/homebrew/opt/openssl@3/bin` (and `/usr/local/opt/openssl@3/bin` on Intel Macs) to `PATH` when sourced, so `openssl` resolves to Homebrew's OpenSSL 3.x rather than Apple's LibreSSL.
+
+Before programming a key, install the bounded Yubico Python API dependency in
+an isolated environment. The repository constraint stays within Yubico's
+public API-compatible major version:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r requirements-programmer.in
+```
 
 If you see `LibreSSL detected` when running any command, your `PATH` is overriding the toolkit's bootstrap. Either run scripts from a fresh terminal or explicitly install: `brew install openssl@3`.
 
@@ -107,7 +117,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 | Command | Description |
 |---------|-------------|
 | `yubi.sh bootstrap [count]` | Generate seeds from scratch (default: 15) |
-| `yubi.sh bootstrap [count] <file>` | Generate seeds with extra entropy from file |
+| `yubi.sh bootstrap [count] <file>` | Legacy positional form; external beacon files are rejected |
 | `yubi.sh bootstrap [count] --mux` | Generate seeds with 2-device password muxing |
 | `yubi.sh bootstrap [count] --image-dir <path>` | Generate seeds with image file hashes as entropy |
 | `yubi.sh mux` | Pair passwords from 2 existing YubiKeys |
@@ -135,7 +145,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 | `yubi.sh info [serial]` | Detailed info for a specific key |
 | `yubi.sh status` | Show seed pool status |
 | `yubi.sh doctor [serial]` | Machine-readable dependency and device support report (`--json`) |
-| `yubi.sh reset <piv|fido2> [serial]` | Reset exactly one named application after an independent typed confirmation |
+| `yubi.sh reset <piv\|fido2> [serial]` | Reset exactly one named application after an independent typed confirmation |
 | `yubi.sh purge` | Remove empty/exhausted encrypted pool files |
 
 ### Air-Gapped Flags
@@ -166,6 +176,7 @@ may archive those files as provenance, but they are not credential material.
 Each encrypted pool receives a separate mode-600 `.provenance.json` record
 identifying the platform CSPRNG as the secret root, human/sensor/image inputs as
 unassessed supplements, and public diversification as disabled.
+
 ## Architecture
 
 ### Two Paths
@@ -270,14 +281,14 @@ of claiming that overwrite or TRIM can reliably erase it.
 
 All password entry uses silent terminal input (`read -rs`). After entry, a masked preview is displayed showing only the first 5 and last 5 characters:
 
-```
+```text
   [D1 #1] vvccb...jneld
   [D1 #2] krtgh...pqwmx
 ```
 
 ## File Structure
 
-```
+```text
 ~/.yubikey-seeds/                       # Managed seed directory (mode 700)
   recipient                             # Public age recipient only
   bootstrap-20260308-143022.age         # Authenticated encrypted pool
@@ -285,9 +296,10 @@ All password entry uses silent terminal input (`read -rs`). After entry, a maske
   mux-20260308-150000.age               # Authenticated encrypted pool
 ```
 
-Entropy collection files are stored wherever you specify (not in the seed directory):
+Legacy entropy collection files may be retained wherever you previously stored
+them, but they are provenance-only and are not accepted as credential input:
 
-```
+```text
 ~/entropy-data/pool.bin                 # Portable entropy file (YUBI-ENTROPY-V1)
 ```
 
@@ -314,11 +326,14 @@ The current tested policy is:
 
 - Bash 3.2, 4.x, or 5.x and Python 3
 - OpenSSL 3.x with a passing deterministic HKDF-SHA256 known-answer test
-- YubiKey Manager (`ykman`) 5.5.x through 5.9.x
+- YubiKey Manager (`ykman`) `>=5.5.1,<6`; 5.5.1 and 5.9.2 fixtures are covered,
+  and 5.9.2 is recommended for new installations
 - YubiKey 5 family firmware 5.4.x through 5.8.x with OTP, CCID, Yubico
   OTP, PIV, and FIDO2 enabled
 
-Unknown major versions and products are intentionally rejected until fixtures
+The compatibility range is a bounded transitional policy, not a claim that
+every minor release has received hardware-in-the-loop validation. Unknown
+major versions and products are intentionally rejected until fixtures
 and hardware verification establish support. FIDO-only Security Key and
 YubiKey Bio products cannot satisfy the OTP/PIV provisioning profile.
 
@@ -350,26 +365,33 @@ macOS Bash 3.2 gate and hardware-test boundary.
 ## Troubleshooting
 
 ### "LibreSSL detected" (macOS)
+
 Your `openssl` is resolving to Apple's `/usr/bin/openssl` (LibreSSL), which lacks the `kdf` subcommand. Install Homebrew OpenSSL: `brew install openssl@3`. The toolkit auto-prepends the brew path when scripts are sourced, so this typically resolves itself once `openssl@3` is installed. If you have a custom `PATH` that overrides this, ensure `/opt/homebrew/opt/openssl@3/bin` (Apple Silicon) or `/usr/local/opt/openssl@3/bin` (Intel) appears before `/usr/bin`.
 
 ### "OpenSSL 3.0+ required" (Linux)
+
 Your system has OpenSSL 1.x. Upgrade to a newer OS (Ubuntu 22.04+) or install OpenSSL 3.x manually. The `openssl kdf` subcommand is required for HKDF and does not exist in 1.x.
 
 ### "No YubiKeys detected"
+
 Ensure `ykman` is installed and your YubiKey is inserted. Try `ykman list` to verify. If using USB-C, try a different port.
 
 On macOS, you may need to grant USB device access to your terminal app the first time you use ykman. If `ykman list` hangs, unplug and replug the key.
 
 ### Mouse entropy falls back to keyboard
+
 This happens when no X11 display is available -- always the case on macOS (which uses Quartz, not X11), and on headless Linux, Wayland-only sessions, or SSH sessions. The toolkit collects another keyboard sample, but makes no entropy estimate for either input; the CSPRNG remains the security root.
 
 ### External API inputs are rejected
+
 Live NIST, drand, and random.org paths were removed because the previous code did not authenticate them. Legacy external files are not mixed. This cannot weaken generated values because public inputs were never a required secret source.
 
 ### Entropy file validation fails
+
 Run `yubi.sh entropy-verify <file>` for diagnostics. Common causes: file was truncated during transfer, or modified after collection (SHA-256 mismatch).
 
 ### "command not found: now_ns" or similar (macOS)
+
 You ran one of the helper scripts (e.g. `bootstrap-entropy.sh`) directly without sourcing through `yubi.sh`, AND your `bash` is exiting before `yubi-lib.sh` is fully loaded. Always invoke commands via `./yubi.sh <subcommand>` -- the unified entry point sources the library correctly.
 
 ## License

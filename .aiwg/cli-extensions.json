@@ -1,0 +1,236 @@
+{
+  "century-readiness": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/century-readiness/commands",
+    "description": "Review long-horizon obligations, dependencies, replacement paths, and meaning packages",
+    "subcommands": {
+      "review": {
+        "file": "century-review.mjs",
+        "description": "Generate an actionable century-scale readiness report"
+      }
+    }
+  },
+  "composition": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/composition-engine/commands",
+    "description": "Validate and execute provider-neutral Flow graphs; installed contracts: schemas/flow-graph.schema.json, fixtures/, examples/",
+    "subcommands": {
+      "validate": {
+        "file": "composition.mjs",
+        "description": "Validate and normalize one FlowGraph manifest"
+      },
+      "example": {
+        "file": "composition-example.mjs",
+        "description": "Print or copy a shipped, validated FlowGraph example"
+      },
+      "run": {
+        "file": "composition-run.mjs",
+        "description": "Execute one validated FlowGraph through an explicit adapter"
+      },
+      "benchmark": {
+        "file": "composition-benchmark.mjs",
+        "description": "Evaluate fixed composition policies and emit raw records plus a claim-gated summary"
+      }
+    }
+  },
+  "compound-memory": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/compound-memory/commands",
+    "description": "Inspect and orchestrate governed compound project memory",
+    "subcommands": {
+      "status": {
+        "file": "compound-memory.mjs",
+        "description": "Report dependency, data, index, review, and integrity readiness"
+      },
+      "ingest": {
+        "file": "compound-memory.mjs",
+        "description": "Preview or preserve a project source and route it to sessions or llm-wiki"
+      },
+      "capture-output": {
+        "file": "compound-memory.mjs",
+        "description": "Preview or register a derived output with exact context lineage"
+      },
+      "context": {
+        "file": "compound-memory.mjs",
+        "description": "Build a deterministic bounded context pack from line memory and wiki"
+      },
+      "review": {
+        "file": "compound-memory.mjs",
+        "description": "List a bounded, redacted queue of pending memory candidates"
+      },
+      "update": {
+        "file": "compound-memory.mjs",
+        "description": "Preview and confirm canonical provider-neutral context changes"
+      },
+      "maintain": {
+        "file": "compound-memory.mjs",
+        "description": "Preview maintenance or confirm replay-safe work with a receipt"
+      }
+    }
+  },
+  "graph": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/graph-pattern/commands",
+    "description": "Validate and explain graph.flow.aiwg.io Flow profiles",
+    "subcommands": {
+      "validate": {
+        "file": "graph.mjs",
+        "description": "Validate and normalize a GraphPlaybook"
+      },
+      "explain": {
+        "file": "graph-explain.mjs",
+        "description": "Explain static nodes, routes, guards, joins, and runtime bindings"
+      },
+      "dry-run": {
+        "file": "graph-dry-run.mjs",
+        "description": "Produce a deterministic route plan without side effects"
+      },
+      "replay": {
+        "file": "graph-replay.mjs",
+        "description": "Assess and resume a graph run from a compatible checkpoint"
+      },
+      "scaffold": {
+        "file": "graph-scaffold.mjs",
+        "description": "Create a project-local GraphPlaybook and state schema from a safe template"
+      },
+      "conformance": {
+        "file": "graph-conformance.mjs",
+        "description": "Run the fast headless graph conformance matrix"
+      }
+    }
+  },
+  "line-memory": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/line-memory/commands",
+    "description": "Bounded plain-text project memory",
+    "subcommands": {
+      "add": {
+        "file": "line-memory.mjs",
+        "description": "Add or refresh a retained memory"
+      },
+      "import": {
+        "file": "line-memory.mjs",
+        "description": "Import a reviewed fact with provenance"
+      },
+      "list": {
+        "file": "line-memory.mjs",
+        "description": "List a bounded slice of newest memories"
+      },
+      "search": {
+        "file": "line-memory.mjs",
+        "description": "Search a bounded slice and refresh matching memories"
+      },
+      "touch": {
+        "file": "line-memory.mjs",
+        "description": "Move an exact memory to the newest position"
+      },
+      "archive": {
+        "file": "line-memory.mjs",
+        "description": "Archive a retained memory by handle or exact value"
+      },
+      "remove": {
+        "file": "line-memory.mjs",
+        "description": "Remove a retained memory with an audit tombstone"
+      },
+      "supersede": {
+        "file": "line-memory.mjs",
+        "description": "Supersede a retained memory with a replacement reference"
+      },
+      "prune": {
+        "file": "line-memory.mjs",
+        "description": "Remove the oldest memories above the retention limit"
+      },
+      "config": {
+        "file": "line-memory.mjs",
+        "description": "Get or set line-memory configuration"
+      }
+    }
+  },
+  "context-bench": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/long-context-bench/commands",
+    "description": "Benchmark context strategies without enabling product integration",
+    "subcommands": {
+      "run": {
+        "file": "context-bench.mjs",
+        "description": "Compare compressed context against required AIWG baselines"
+      }
+    }
+  },
+  "monitorability-red-team": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/monitorability-red-team/commands",
+    "description": "Evaluate synthetic local monitorability fixtures and label observation limits",
+    "subcommands": {
+      "run": {
+        "file": "monitorability-red-team.mjs",
+        "description": "Run a synthetic monitorability suite without network or provider access"
+      }
+    }
+  },
+  "harness": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/natural-language-harness/commands",
+    "description": "Validate, plan, and ablate inspectable NLAH.md harness documents",
+    "subcommands": {
+      "validate": {
+        "file": "nlah.mjs",
+        "description": "Validate an NLAH.md document and its deterministic execution map"
+      },
+      "plan": {
+        "file": "nlah.mjs",
+        "description": "Render the deterministic execution plan without executing it"
+      },
+      "ablate": {
+        "file": "nlah.mjs",
+        "description": "Remove one named module and report the resulting plan delta"
+      }
+    }
+  },
+  "nlp": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/nlp-prod/commands",
+    "description": "LLM inference pipeline toolkit",
+    "subcommands": {
+      "new": {
+        "file": "new.mjs",
+        "description": "Scaffold a new pipeline (interactive wizard)"
+      },
+      "add-step": {
+        "file": "add-step.mjs",
+        "description": "Add a step to an existing pipeline"
+      },
+      "eval": {
+        "file": "eval.mjs",
+        "description": "Run eval loop against pipeline test cases"
+      },
+      "optimize": {
+        "file": "optimize.mjs",
+        "description": "Analyze cost and latency optimization opportunities"
+      },
+      "productionize": {
+        "file": "productionize.mjs",
+        "description": "Production readiness review + slim-down generation"
+      },
+      "estimate-cost": {
+        "file": "estimate-cost.mjs",
+        "description": "Estimate inference cost at target volume"
+      },
+      "status": {
+        "file": "status.mjs",
+        "description": "Overview of all pipelines in project"
+      }
+    }
+  },
+  "topology-lab": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/orchestration-topology-lab/commands",
+    "description": "Compare orchestration topologies from trusted evaluation observations",
+    "subcommands": {
+      "run": {
+        "file": "topology-lab.mjs",
+        "description": "Evaluate one task family across supported topology variants"
+      }
+    }
+  },
+  "premortem-v2": {
+    "source": "/home/roctinam/dev/aiwg/agentic/code/addons/premortem-v2/commands",
+    "description": "Run diversity-first premortems with blind plausibility and impact verification",
+    "subcommands": {
+      "run": {
+        "file": "premortem-v2.mjs",
+        "description": "Generate, select, and independently verify a bounded risk set"
+      }
+    }
+  }
+}
