@@ -8,11 +8,11 @@
 # Platform detection and PATH bootstrap
 # =============================================================================
 #
-# Linux: GNU coreutils, OpenSSL 3.x at /usr/bin/openssl, /sys/class/thermal,
-#        lm-sensors, fstrim — all expected on PATH.
+# Linux: GNU coreutils, OpenSSL 3.x, /sys/class/thermal, and optional
+#        lm-sensors.
 # macOS: BSD coreutils (no `stat -c`, no `date +%s%N`, no `date -d`),
 #        /usr/bin/openssl is LibreSSL (no `openssl kdf`), no /sys/class/thermal,
-#        no lm-sensors, no fstrim. brew openssl@3 + ykman expected via Homebrew.
+#        no lm-sensors. brew openssl@3 + ykman expected via Homebrew.
 #
 # We prepend Homebrew prefixes to PATH so `openssl` resolves to OpenSSL 3.x and
 # `ykman` is found, then provide portable wrappers for stat/date/thermal.
