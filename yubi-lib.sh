@@ -22,7 +22,7 @@ case "$(uname -s 2>/dev/null)" in
     *)      _IS_MACOS=false ;;
 esac
 
-if [[ "$_IS_MACOS" == "true" ]]; then
+if [[ "$_IS_MACOS" == "true" && "${YUBI_TEST_KEEP_PATH:-false}" != "true" ]]; then
     # Prefer brew openssl@3 over LibreSSL at /usr/bin/openssl
     for _brew_prefix in /opt/homebrew/opt/openssl@3/bin /usr/local/opt/openssl@3/bin \
                         /opt/homebrew/bin /usr/local/bin; do

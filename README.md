@@ -136,6 +136,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 | `yubi.sh info [serial]` | Detailed info for a specific key |
 | `yubi.sh status` | Show seed pool status |
 | `yubi.sh doctor [serial]` | Machine-readable dependency and device support report (`--json`) |
+| `yubi.sh reset <piv|fido2> [serial]` | Reset exactly one named application after an independent typed confirmation |
 | `yubi.sh purge` | Remove empty/exhausted encrypted pool files |
 
 ### Air-Gapped Flags
@@ -248,6 +249,12 @@ Credential expansion uses the versioned `YUBI-CRED-V2` suite, independent
 application/purpose labels, and unbiased rejection sampling. Persistent-pool
 configuration has no implicit profile: select `v2`, or select `legacy-v1` only
 for an intentional migration. See [the derivation specification](docs/derivation-v2.md).
+
+Provisioning scope is PIV plus both OTP slots, with FIDO2 PIN included only
+when `--with-fido-pin` is supplied. It does not initialize OATH, OpenPGP,
+YubiHSM Auth, or every YubiKey application. PIV and FIDO2 resets are separate
+`reset` operations with application-specific typed confirmation; provisioning
+never performs either reset automatically.
 
 ### Mux Process
 

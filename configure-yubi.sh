@@ -62,11 +62,15 @@ shift 3
 RECOVERY_FILE=""
 RECOVERY_RECIPIENT=""
 DERIVATION_PROFILE=""
+WITH_FIDO_PIN=false
+STATE_FILE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --recovery-file) RECOVERY_FILE="$2"; shift 2 ;;
         --recovery-recipient) RECOVERY_RECIPIENT="$2"; shift 2 ;;
         --derivation-profile) DERIVATION_PROFILE="$2"; shift 2 ;;
+        --with-fido-pin) WITH_FIDO_PIN=true; shift ;;
+        --state-file) STATE_FILE="$2"; shift 2 ;;
         *) log_err "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -83,6 +87,10 @@ case "$DERIVATION_PROFILE" in
         exit 1
         ;;
 esac
+[[ -n "$STATE_FILE" && ! -L "$STATE_FILE" ]] || {
+    log_err "A non-symlink --state-file is required for durable recovery state"
+    exit 1
+}
 
 validate_mode "$MODE"
 validate_serial "$SERIAL"
@@ -341,6 +349,11 @@ log_info "Target:      YubiKey $SERIAL"
 log_info "OTP Slot 1:  ${slot1_desc}"
 log_info "OTP Slot 2:  ${slot2_desc}"
 log_info "PIV:         unique PIN, PUK, and ${MGMT_KEY_ALGO} management key"
+if [[ "$WITH_FIDO_PIN" == true ]]; then
+    log_info "FIDO2:       set an independent PIN"
+else
+    log_info "FIDO2:       outside requested scope"
+fi
 log_info "Derivation:  $DERIVATION_PROFILE"
 log_info "Recovery:    ${RECOVERY_FILE:-disabled}"
 echo ""
@@ -365,17 +378,54 @@ if [[ "$slot2_mode" == "otp" ]]; then
 else
     slot2_json=$(printf '{"kind":"static","password":"%s"}' "$s2_pw")
 fi
-printf '{"serial":%s,"management_algorithm":"%s","management_key":"%s","pin":"%s","puk":"%s","slot1":%s,"slot2":%s,"fido_pin":"%s","derivation_profile":"%s"}\n' \
+scope_json='["piv","otp"]'
+[[ "$WITH_FIDO_PIN" == true ]] && scope_json='["piv","otp","fido2"]'
+printf '{"serial":%s,"management_algorithm":"%s","management_key":"%s","pin":"%s","puk":"%s","slot1":%s,"slot2":%s,"fido_pin":"%s","derivation_profile":"%s","scope":%s}\n' \
     "$SERIAL" "$MGMT_KEY_ALGO" "$derived_mgmt" "$derived_pin" "$derived_puk" \
-    "$slot1_json" "$slot2_json" "$derived_fido_pin" "$DERIVATION_PROFILE" > "$descriptor"
+    "$slot1_json" "$slot2_json" "$derived_fido_pin" "$DERIVATION_PROFILE" "$scope_json" > "$descriptor"
+
+state_update() {
+    local status="$1" phase="$2" completed="$3" guidance="$4" tmp
+    tmp=$(mktemp "$(dirname "$STATE_FILE")/.$(basename "$STATE_FILE").XXXXXX")
+    chmod 600 "$tmp"
+    printf '{"version":1,"serial":%s,"scope":%s,"status":"%s","phase":"%s","completed":%s,"guidance":"%s"}\n' \
+        "$SERIAL" "$scope_json" "$status" "$phase" "$completed" "$guidance" > "$tmp"
+    mv -f "$tmp" "$STATE_FILE"
+}
+
+adapter_phase() {
+    local phase="$1" completed="$2" failure_status="$3" result result_status=0
+    if [[ -n "${YUBI_PROGRAMMER:-}" ]]; then
+        result=$("$YUBI_PROGRAMMER" "--phase=$phase" < "$descriptor") || result_status=$?
+    else
+        result=$(python3 "$SCRIPT_DIR/yubikey-programmer.py" "--phase=$phase" < "$descriptor") || result_status=$?
+    fi
+    if [[ "${result_status:-0}" -ne 0 ]]; then
+        state_update "$failure_status" "$phase" "$completed" "Inspect this redacted state and the encrypted recovery record; do not reuse the pending pool."
+        log_err "$phase phase failed; durable recovery state was written"
+        exit 1
+    fi
+    [[ "$result" == *'"ok": true'* ]] || {
+        state_update "$failure_status" "$phase" "$completed" "Adapter response was invalid; do not reuse the pending pool."
+        exit 1
+    }
+}
+
+state_update "in-progress" "preflight" '[]' "Preflight is running; no device mutation has occurred."
+adapter_phase preflight '[]' failed
+state_update "in-progress" "preflight-complete" '[]' "Preflight passed; no device mutation has occurred."
+if [[ "${YUBI_FAULT_AFTER_PHASE:-}" == "preflight" ]]; then
+    state_update failed "fault-after-preflight" '[]' "Injected failure after preflight; no device mutation occurred."
+    exit 90
+fi
 
 if [[ -n "$RECOVERY_FILE" ]]; then
-    command -v age >/dev/null 2>&1 || { log_err "age is required for recovery output"; exit 1; }
+    command -v age >/dev/null 2>&1 || { state_update failed recovery '[]' "age is unavailable; no device mutation occurred."; exit 1; }
     recovery_tmp="${RECOVERY_FILE}.tmp.$$"
     umask 077
     if ! age -r "$RECOVERY_RECIPIENT" < "$descriptor" > "$recovery_tmp"; then
         rm -f "$recovery_tmp"
-        log_err "Recovery encryption failed; device was not modified"
+        state_update failed recovery '[]' "Recovery encryption failed; no device mutation occurred."
         exit 1
     fi
     chmod 600 "$recovery_tmp"
@@ -383,14 +433,31 @@ if [[ -n "$RECOVERY_FILE" ]]; then
     log_ok "Encrypted recovery record written"
 fi
 
-log_info "Programming PIV, OTP, and FIDO2 through the Yubico API adapter..."
-if ! adapter_result=$(python3 "$SCRIPT_DIR/yubikey-programmer.py" < "$descriptor"); then
-    log_err "Programming adapter failed; generated values were not displayed"
-    exit 1
+adapter_phase piv '[]' partial
+state_update in-progress piv-complete '["piv"]' "PIV postconditions passed; continue with OTP using the same recovery record."
+if [[ "${YUBI_FAULT_AFTER_PHASE:-}" == "piv" ]]; then
+    state_update partial fault-after-piv '["piv"]' "PIV completed; OTP and FIDO2 were not attempted."
+    exit 90
 fi
-[[ "$adapter_result" == *'"ok": true'* ]] || { log_err "Programming adapter returned an invalid result"; exit 1; }
-log_ok "Programming adapter completed"
 
+adapter_phase otp '["piv"]' partial
+state_update in-progress otp-complete '["piv","otp"]' "PIV and OTP postconditions passed."
+if [[ "${YUBI_FAULT_AFTER_PHASE:-}" == "otp" ]]; then
+    state_update partial fault-after-otp '["piv","otp"]' "PIV and OTP completed; optional FIDO2 was not attempted."
+    exit 90
+fi
+
+completed='["piv","otp"]'
+if [[ "$WITH_FIDO_PIN" == true ]]; then
+    adapter_phase fido2 "$completed" partial
+    completed='["piv","otp","fido2"]'
+    state_update in-progress fido2-complete "$completed" "All requested application postconditions passed."
+    if [[ "${YUBI_FAULT_AFTER_PHASE:-}" == "fido2" ]]; then
+        state_update partial fault-after-fido2 "$completed" "All mutations passed, but final commit did not run; reconcile before consuming seeds."
+        exit 90
+    fi
+fi
+state_update complete complete "$completed" "All requested application postconditions passed; seed consumption may commit."
 : > "$descriptor"
 rm -f "$descriptor"
 CONFIGURE_TMPFILE=""
@@ -449,12 +516,16 @@ fi
 
 echo ""
 log_ok "============================================"
-log_ok " YubiKey $SERIAL — fully initialized"
+log_ok " YubiKey $SERIAL — requested application scope complete"
 log_ok "============================================"
 log_ok "OTP Slot 1:  ${slot1_desc}"
 log_ok "OTP Slot 2:  ${slot2_desc}"
 log_ok "PIV credentials: programmed (values not displayed)"
-log_ok "FIDO2 PIN:       programmed (value not displayed)"
+if [[ "$WITH_FIDO_PIN" == true ]]; then
+    log_ok "FIDO2 PIN:       programmed (value not displayed)"
+else
+    log_info "FIDO2 PIN:       unchanged (outside requested scope)"
+fi
 if [[ -n "$RECOVERY_FILE" ]]; then
     log_ok "Recovery record: encrypted operator-selected sink"
 else

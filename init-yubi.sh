@@ -44,6 +44,7 @@ Options:
   --recovery-file PATH  Write an encrypted recovery record
   --recovery-recipient RECIPIENT
                         age recipient for the recovery record
+  --with-fido-pin       Include an independent FIDO2 PIN in requested scope
 
 You will be prompted to tap 2 source YubiKeys for entropy input.
 USAGE
@@ -58,6 +59,7 @@ ENTROPY_FILE_PATH=""
 ALLOW_DISK_WORKSPACE=false
 RECOVERY_FILE=""
 RECOVERY_RECIPIENT=""
+WITH_FIDO_PIN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --allow-disk-workspace) ALLOW_DISK_WORKSPACE=true; shift ;;
         --recovery-file) RECOVERY_FILE="$2"; shift 2 ;;
         --recovery-recipient) RECOVERY_RECIPIENT="$2"; shift 2 ;;
+        --with-fido-pin) WITH_FIDO_PIN=true; shift ;;
         *) log_err "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -80,6 +83,11 @@ if [[ -n "$RECOVERY_FILE" || -n "$RECOVERY_RECIPIENT" ]]; then
     }
     recovery_args=(--recovery-file "$RECOVERY_FILE" --recovery-recipient "$RECOVERY_RECIPIENT")
 fi
+[[ "$WITH_FIDO_PIN" == true ]] && recovery_args+=(--with-fido-pin)
+STATE_DIR="${HOME}/.yubikey-seeds"
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+STATE_FILE="$STATE_DIR/transaction-${SERIAL}.json"
 
 # --- Verify scripts exist ---
 for script in yubi-mux.sh entropy-mix.sh configure-yubi.sh; do
@@ -538,6 +546,7 @@ log_info "============================================"
 # exactly 5 lines so all will be used. Pass through to it.
 "$SCRIPT_DIR/configure-yubi.sh" "$MODE" "$SERIAL" "$ENRICHED_FILE" \
     --derivation-profile v2 \
+    --state-file "$STATE_FILE" \
     "${recovery_args[@]+"${recovery_args[@]}"}"
 
 # =============================================================================

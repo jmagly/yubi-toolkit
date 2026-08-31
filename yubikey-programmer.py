@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Secret-safe YubiKey programming adapter for yubikey-manager 5.9.x.
-
-The descriptor is read only from stdin. Output is a non-sensitive JSON status.
-"""
+"""Phase-scoped YubiKey programmer using yubikey-manager public APIs."""
 
 from __future__ import annotations
 
@@ -22,10 +19,12 @@ def validate(data: object) -> dict:
         fail("descriptor must be an object")
     required = {
         "serial", "management_algorithm", "management_key", "pin", "puk",
-        "slot1", "slot2", "fido_pin", "derivation_profile",
+        "slot1", "slot2", "fido_pin", "derivation_profile", "scope",
     }
     if set(data) != required:
         fail("descriptor fields are invalid")
+    if data["scope"] not in (["piv", "otp"], ["piv", "otp", "fido2"]):
+        fail("scope is invalid")
     if not isinstance(data["serial"], int) or data["serial"] <= 0:
         fail("serial is invalid")
     if data["management_algorithm"] not in {"TDES", "AES256"}:
@@ -58,74 +57,92 @@ def validate(data: object) -> dict:
     return data
 
 
-def select_device(serial: int):
+def api_context(data: dict):
+    package_version = tuple(int(x) for x in version("yubikey-manager").split(".")[:3])
+    if not (package_version >= (5, 9, 2) and package_version < (6, 0, 0)):
+        fail("yubikey-manager Python package 5.9.2 through 5.x is required")
     from ykman.device import list_all_devices
-
-    matches = [(device, info) for device, info in list_all_devices() if info.serial == serial]
+    matches = [(device, info) for device, info in list_all_devices() if info.serial == data["serial"]]
     if len(matches) != 1:
         fail("target device selection is not unique")
     return matches[0][0]
 
 
-def program(data: dict) -> None:
-    package_version = tuple(int(x) for x in version("yubikey-manager").split(".")[:3])
-    if not (package_version >= (5, 9, 2) and package_version < (6, 0, 0)):
-        fail("yubikey-manager Python package 5.9.2 through 5.x is required")
-
-    from fido2.ctap import CtapError
-    from fido2.ctap2 import Ctap2, ClientPin
-    from ykman.scancodes import KEYBOARD_LAYOUT, encode
-    from yubikit.core.fido import FidoConnection
-    from yubikit.core.otp import OtpConnection
-    from yubikit.core.smartcard import SmartCardConnection
-    from yubikit.piv import DEFAULT_MANAGEMENT_KEY, MANAGEMENT_KEY_TYPE, PivSession
-    from yubikit.yubiotp import SLOT, StaticPasswordSlotConfiguration, YubiOtpSession, YubiOtpSlotConfiguration
-
-    device = select_device(data["serial"])
-    algorithm = MANAGEMENT_KEY_TYPE[data["management_algorithm"]]
-    new_management_key = bytes.fromhex(data["management_key"])
-
-    with device.open_connection(SmartCardConnection) as connection:
-        session = PivSession(connection)
-        session.authenticate(DEFAULT_MANAGEMENT_KEY)
-        session.set_management_key(algorithm, new_management_key)
-        session.change_puk("12345678", data["puk"])
-        session.change_pin("123456", data["pin"])
-
-    with device.open_connection(OtpConnection) as connection:
-        session = YubiOtpSession(connection)
-        public_id = b"\xff\x00" + struct.pack(">I", data["serial"])
-        for slot_number in (1, 2):
-            slot = data[f"slot{slot_number}"]
-            if slot["kind"] == "yubiotp":
-                config = YubiOtpSlotConfiguration(
-                    public_id, bytes.fromhex(slot["private_id"]), bytes.fromhex(slot["aes_key"])
-                )
-            else:
-                config = StaticPasswordSlotConfiguration(encode(slot["password"], KEYBOARD_LAYOUT.US))
-            session.put_configuration(SLOT(slot_number), config)
-
-    with device.open_connection(FidoConnection) as connection:
-        try:
-            ClientPin(Ctap2(connection)).set_pin(data["fido_pin"])
-        except CtapError as error:
-            if error.code in {CtapError.ERR.INVALID_LENGTH, CtapError.ERR.PIN_POLICY_VIOLATION}:
-                fail("FIDO PIN rejected by device policy")
-            if error.code in {CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID}:
-                fail("FIDO PIN is already configured with a different policy")
-            raise
+def run_phase(data: dict, phase: str) -> None:
+    device = api_context(data)
+    if phase == "preflight":
+        return
+    if phase == "piv":
+        from yubikit.core.smartcard import SmartCardConnection
+        from yubikit.piv import DEFAULT_MANAGEMENT_KEY, MANAGEMENT_KEY_TYPE, PivSession
+        algorithm = MANAGEMENT_KEY_TYPE[data["management_algorithm"]]
+        with device.open_connection(SmartCardConnection) as connection:
+            session = PivSession(connection)
+            session.authenticate(DEFAULT_MANAGEMENT_KEY)
+            session.set_management_key(algorithm, bytes.fromhex(data["management_key"]))
+            session.change_puk("12345678", data["puk"])
+            session.change_pin("123456", data["pin"])
+            if session.get_management_key_metadata().default_value:
+                fail("PIV management-key postcondition failed")
+            if session.get_pin_metadata().default_value or session.get_puk_metadata().default_value:
+                fail("PIV PIN/PUK postcondition failed")
+        return
+    if phase == "otp":
+        from ykman.scancodes import KEYBOARD_LAYOUT, encode
+        from yubikit.core.otp import OtpConnection
+        from yubikit.yubiotp import SLOT, StaticPasswordSlotConfiguration, YubiOtpSession, YubiOtpSlotConfiguration
+        with device.open_connection(OtpConnection) as connection:
+            session = YubiOtpSession(connection)
+            public_id = b"\xff\x00" + struct.pack(">I", data["serial"])
+            for slot_number in (1, 2):
+                slot = data[f"slot{slot_number}"]
+                if slot["kind"] == "yubiotp":
+                    config = YubiOtpSlotConfiguration(
+                        public_id, bytes.fromhex(slot["private_id"]), bytes.fromhex(slot["aes_key"])
+                    )
+                else:
+                    config = StaticPasswordSlotConfiguration(encode(slot["password"], KEYBOARD_LAYOUT.US))
+                session.put_configuration(SLOT(slot_number), config)
+            state = session.get_config_state()
+            if not state.is_configured(SLOT.ONE) or not state.is_configured(SLOT.TWO):
+                fail("OTP slot postcondition failed")
+        return
+    if phase == "fido2":
+        if "fido2" not in data["scope"]:
+            fail("FIDO2 is outside the requested scope")
+        from fido2.ctap import CtapError
+        from fido2.ctap2 import Ctap2, ClientPin
+        from yubikit.core.fido import FidoConnection
+        with device.open_connection(FidoConnection) as connection:
+            ctap2 = Ctap2(connection)
+            try:
+                ClientPin(ctap2).set_pin(data["fido_pin"])
+            except CtapError as error:
+                if error.code in {CtapError.ERR.INVALID_LENGTH, CtapError.ERR.PIN_POLICY_VIOLATION}:
+                    fail("FIDO PIN rejected by device policy")
+                fail("FIDO PIN mutation failed")
+            if not ctap2.info.options.get("clientPin"):
+                fail("FIDO PIN postcondition failed")
+        return
+    fail("unsupported phase")
 
 
 def main() -> None:
+    phase = "validate"
+    for argument in sys.argv[1:]:
+        if argument.startswith("--phase="):
+            phase = argument.split("=", 1)[1]
+        elif argument != "--validate-only":
+            fail("unsupported adapter argument")
     try:
         descriptor = validate(json.load(sys.stdin))
         if "--validate-only" not in sys.argv[1:]:
-            program(descriptor)
+            run_phase(descriptor, phase)
     except SystemExit:
         raise
     except Exception as error:
-        fail(f"programming failed: {type(error).__name__}")
-    print(json.dumps({"ok": True, "applications": ["piv", "otp", "fido2"]}))
+        fail(f"phase failed: {type(error).__name__}")
+    print(json.dumps({"ok": True, "phase": phase}))
 
 
 if __name__ == "__main__":

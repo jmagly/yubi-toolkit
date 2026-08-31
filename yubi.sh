@@ -13,6 +13,7 @@
 #   info        [serial]             Detailed info for a specific key
 #   status                           Show seed pool status
 #   doctor      [serial]             Report dependency and device support
+#   reset       <piv|fido2> [serial]  Separately confirmed application reset
 #   purge                            Remove empty/exhausted encrypted pool files
 #
 # Persistent pools are authenticated age ciphertext in ~/.yubikey-seeds/.
@@ -160,6 +161,7 @@ BANNER
     printf "  ${GRN}info${RST}             [serial]              Detailed info (auto-detects single key)\n"
     printf "  ${GRN}status${RST}                                 Show seed pool status\n"
     printf "  ${GRN}doctor${RST}           [serial]              Dependency and capability report\n"
+    printf "  ${GRN}reset${RST}            <piv|fido2> [serial]  Reset one named application\n"
     printf "  ${GRN}purge${RST}                                  Remove empty/exhausted encrypted pools\n"
     echo ""
     printf "${BLD}Modes:${RST}  otp | static | mixed\n"
@@ -340,6 +342,7 @@ case "$CMD" in
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --recovery-file|--recovery-recipient|--derivation-profile) configure_args+=("$1" "$2"); shift 2 ;;
+                --with-fido-pin) configure_args+=("$1"); shift ;;
                 *) [[ -z "$serial" ]] || { log_err "Unexpected argument: $1"; exit 1; }; serial="$1"; shift ;;
             esac
         done
@@ -366,6 +369,7 @@ case "$CMD" in
         mv "$pool" "$pending_pool"
         seed_pool_decrypt "$pending_pool" "$plain_pool"
         "$SCRIPT_DIR/configure-yubi.sh" "$mode" "$serial" "$plain_pool" \
+            --state-file "${pending_pool}.state" \
             "${configure_args[@]+"${configure_args[@]}"}"
         remaining=$(grep -c '.' "$plain_pool" 2>/dev/null || true)
         if [[ "$remaining" -gt 0 ]]; then
@@ -390,6 +394,7 @@ case "$CMD" in
                 --entropy-file) passthrough_args+=(--entropy-file "$2"); shift 2 ;;
                 --allow-disk-workspace) passthrough_args+=(--allow-disk-workspace); shift ;;
                 --recovery-file|--recovery-recipient) passthrough_args+=("$1" "$2"); shift 2 ;;
+                --with-fido-pin) passthrough_args+=(--with-fido-pin); shift ;;
                 *)
                     if [[ -z "$serial" ]]; then
                         serial="$1"
@@ -411,6 +416,29 @@ case "$CMD" in
 
     doctor)
         exec "$SCRIPT_DIR/yubi-doctor.sh" "$@"
+        ;;
+
+    reset)
+        require_ykman
+        application="${1:-}"
+        serial="${2:-}"
+        [[ "$application" == piv || "$application" == fido2 ]] || {
+            log_err "Usage: yubi.sh reset <piv|fido2> [serial]"
+            exit 1
+        }
+        [[ -n "$serial" ]] || serial=$(detect_serial)
+        validate_serial "$serial"
+        log_warn "This resets only the $application application on YubiKey $serial."
+        log_warn "No other YubiKey application is included."
+        printf 'Type RESET %s to continue: ' "$(printf '%s' "$application" | tr '[:lower:]' '[:upper:]')"
+        read -r reset_confirmation
+        expected="RESET $(printf '%s' "$application" | tr '[:lower:]' '[:upper:]')"
+        [[ "$reset_confirmation" == "$expected" ]] || { log_info "Reset aborted."; exit 0; }
+        case "$application" in
+            piv) ykman -d "$serial" piv reset --force ;;
+            fido2) ykman -d "$serial" fido reset --force ;;
+        esac
+        log_ok "$application application reset complete"
         ;;
 
     list)

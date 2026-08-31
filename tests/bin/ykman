@@ -6,8 +6,18 @@ if [[ "${1:-}" == "--version" ]]; then
     exit 0
 fi
 
+if [[ "${1:-}" == "list" && "${2:-}" == "--serials" ]]; then
+    printf '%s\n' "${YUBI_TEST_SERIAL:-12345678}"
+    exit 0
+fi
+
 if [[ -n "${YUBI_TEST_YKMAN_FIXTURE:-}" && "${*: -1}" == "info" ]]; then
     sed -n '1,240p' "$YUBI_TEST_YKMAN_FIXTURE"
+    exit 0
+fi
+
+if [[ "$*" == *" otp info" || "$*" == *" piv info" ]]; then
+    printf 'mock application state: configured\n'
     exit 0
 fi
 

@@ -9,7 +9,7 @@ TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/yubi-adapter-test.XXXXXX")
 trap 'jobs -pr | xargs -r kill 2>/dev/null || true; rm -rf "$TEST_DIR"' EXIT HUP INT TERM
 canary="YUBI_CANARY_7f92a8d13c"
 descriptor="$TEST_DIR/descriptor.json"
-printf '{"serial":12345678,"management_algorithm":"AES256","management_key":"%064d","pin":"12345678","puk":"Ab12Cd34","slot1":{"kind":"static","password":"%s"},"slot2":{"kind":"yubiotp","aes_key":"%032d","private_id":"%012d"},"fido_pin":"87654321","derivation_profile":"v2"}\n' \
+printf '{"serial":12345678,"management_algorithm":"AES256","management_key":"%064d","pin":"12345678","puk":"Ab12Cd34","slot1":{"kind":"static","password":"%s"},"slot2":{"kind":"yubiotp","aes_key":"%032d","private_id":"%012d"},"fido_pin":"87654321","derivation_profile":"v2","scope":["piv","otp","fido2"]}\n' \
     0 "$canary" 0 0 > "$descriptor"
 chmod 600 "$descriptor"
 
