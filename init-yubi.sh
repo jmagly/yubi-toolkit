@@ -537,6 +537,7 @@ log_info "============================================"
 # configure-yubi.sh will pick randomly from the file, but we only have
 # exactly 5 lines so all will be used. Pass through to it.
 "$SCRIPT_DIR/configure-yubi.sh" "$MODE" "$SERIAL" "$ENRICHED_FILE" \
+    --derivation-profile v2 \
     "${recovery_args[@]+"${recovery_args[@]}"}"
 
 # =============================================================================

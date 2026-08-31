@@ -331,7 +331,7 @@ case "$CMD" in
         ensure_seed_dir
         require_ykman
         if [[ $# -lt 1 ]]; then
-            log_err "Usage: yubi.sh configure <mode> [serial] [--recovery-file PATH --recovery-recipient AGE_RECIPIENT]"
+            log_err "Usage: yubi.sh configure <mode> [serial] --derivation-profile v2|legacy-v1 [recovery options]"
             exit 1
         fi
         mode="$1"; shift
@@ -339,7 +339,7 @@ case "$CMD" in
         configure_args=()
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --recovery-file|--recovery-recipient) configure_args+=("$1" "$2"); shift 2 ;;
+                --recovery-file|--recovery-recipient|--derivation-profile) configure_args+=("$1" "$2"); shift 2 ;;
                 *) [[ -z "$serial" ]] || { log_err "Unexpected argument: $1"; exit 1; }; serial="$1"; shift ;;
             esac
         done

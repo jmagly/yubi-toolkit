@@ -188,6 +188,51 @@ openssl_hkdf_kat() {
     [[ "$output" == "$expected" ]]
 }
 
+# YUBI-CRED-V2 derivation. Text framing is ASCII decimal-length-prefixed so
+# field boundaries are unambiguous and portable across OpenSSL providers.
+credential_v2_hkdf_hex() {
+    local seed_b64="$1" serial="$2" purpose="$3" counter="$4" length="$5"
+    local suite="YUBI-CRED-V2" salt info ikm_hex salt_hex info_hex
+    salt="${#suite}:$suite|serial:${#serial}:$serial"
+    info="suite:${#suite}:$suite|purpose:${#purpose}:$purpose|counter:8:$(printf '%08x' "$counter")"
+    ikm_hex=$(printf '%s' "$seed_b64" | openssl base64 -d -A | xxd -p | tr -d '\n')
+    salt_hex=$(printf '%s' "$salt" | xxd -p | tr -d '\n')
+    info_hex=$(printf '%s' "$info" | xxd -p | tr -d '\n')
+    openssl kdf -keylen "$length" -kdfopt digest:SHA256 \
+        -kdfopt "hexkey:$ikm_hex" -kdfopt "hexsalt:$salt_hex" \
+        -kdfopt "hexinfo:$info_hex" HKDF 2>/dev/null \
+        | tr -d ':' | tr '[:upper:]' '[:lower:]'
+}
+
+credential_v2_charset() {
+    local seed_b64="$1" serial="$2" purpose="$3" length="$4" alphabet="$5"
+    local counter=0 output="" block mapped remaining
+    while [[ ${#output} -lt $length ]]; do
+        block=$(credential_v2_hkdf_hex "$seed_b64" "$serial" "$purpose" "$counter" 64) || return 1
+        counter=$(( counter + 1 ))
+        remaining=$(( length - ${#output} ))
+        mapped=$(credential_v2_map_block "$block" "$alphabet" "$remaining")
+        output+="$mapped"
+    done
+    printf '%s' "$output"
+}
+
+credential_v2_map_block() {
+    local block="$1" alphabet="$2" max_length="$3" output=""
+    local alphabet_len=${#alphabet} threshold byte_hex byte_dec index
+    threshold=$(( (256 / alphabet_len) * alphabet_len ))
+    while [[ -n "$block" && ${#output} -lt $max_length ]]; do
+        byte_hex="${block:0:2}"
+        block="${block:2}"
+        byte_dec=$((16#$byte_hex))
+        if [[ "$byte_dec" -lt "$threshold" ]]; then
+            index=$(( byte_dec % alphabet_len ))
+            output+="${alphabet:$index:1}"
+        fi
+    done
+    printf '%s' "$output"
+}
+
 version_triplet() {
     local value="$1"
     [[ "$value" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1

@@ -22,7 +22,7 @@ def validate(data: object) -> dict:
         fail("descriptor must be an object")
     required = {
         "serial", "management_algorithm", "management_key", "pin", "puk",
-        "slot1", "slot2", "fido_pin",
+        "slot1", "slot2", "fido_pin", "derivation_profile",
     }
     if set(data) != required:
         fail("descriptor fields are invalid")
@@ -37,8 +37,10 @@ def validate(data: object) -> dict:
         fail("PIV PIN is invalid")
     if not isinstance(data["puk"], str) or len(data["puk"]) != 8 or not data["puk"].isalnum():
         fail("PIV PUK is invalid")
-    if data["fido_pin"] != data["pin"]:
-        fail("FIDO PIN policy mismatch")
+    if data["derivation_profile"] not in {"v2", "legacy-v1"}:
+        fail("derivation profile is invalid")
+    if not isinstance(data["fido_pin"], str) or len(data["fido_pin"]) != 8 or not data["fido_pin"].isdigit():
+        fail("FIDO PIN is invalid")
     for slot_number in (1, 2):
         slot = data[f"slot{slot_number}"]
         if not isinstance(slot, dict) or slot.get("kind") not in {"yubiotp", "static"}:
@@ -70,6 +72,7 @@ def program(data: dict) -> None:
     if not (package_version >= (5, 9, 2) and package_version < (6, 0, 0)):
         fail("yubikey-manager Python package 5.9.2 through 5.x is required")
 
+    from fido2.ctap import CtapError
     from fido2.ctap2 import Ctap2, ClientPin
     from ykman.scancodes import KEYBOARD_LAYOUT, encode
     from yubikit.core.fido import FidoConnection
@@ -103,7 +106,14 @@ def program(data: dict) -> None:
             session.put_configuration(SLOT(slot_number), config)
 
     with device.open_connection(FidoConnection) as connection:
-        ClientPin(Ctap2(connection)).set_pin(data["fido_pin"])
+        try:
+            ClientPin(Ctap2(connection)).set_pin(data["fido_pin"])
+        except CtapError as error:
+            if error.code in {CtapError.ERR.INVALID_LENGTH, CtapError.ERR.PIN_POLICY_VIOLATION}:
+                fail("FIDO PIN rejected by device policy")
+            if error.code in {CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID}:
+                fail("FIDO PIN is already configured with a different policy")
+            raise
 
 
 def main() -> None:

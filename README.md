@@ -125,7 +125,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 
 | Command | Description |
 |---------|-------------|
-| `yubi.sh configure <mode> [serial]` | Program a YubiKey from seed pool |
+| `yubi.sh configure <mode> [serial] --derivation-profile v2` | Program from a pool with an explicit derivation profile |
 | `yubi.sh init <mode> [serial]` | Full pipeline: 2 source keys -> program target |
 
 ### Info
@@ -232,7 +232,7 @@ Each YubiKey initialization consumes **5 seeds** from the pool:
 | PIV PIN | HKDF -> 8 numeric digits |
 | PIV PUK | HKDF -> 8 alphanumeric chars |
 | PIV Management Key | HKDF -> 32-byte AES256 (firmware 5.4.2+) or 24-byte TDES |
-| FIDO2 PIN | Same as PIV PIN (separate application, operationally simpler) |
+| FIDO2 PIN | Independent HKDF purpose -> 8 numeric digits |
 
 ### Entropy Mixing
 
@@ -243,6 +243,11 @@ All entropy combination uses HKDF (HMAC-based Key Derivation Function):
 - **Info**: Unique per-seed label for domain separation
 
 This ensures that even if some entropy sources are compromised, the output remains unpredictable as long as any single source provides genuine randomness.
+
+Credential expansion uses the versioned `YUBI-CRED-V2` suite, independent
+application/purpose labels, and unbiased rejection sampling. Persistent-pool
+configuration has no implicit profile: select `v2`, or select `legacy-v1` only
+for an intentional migration. See [the derivation specification](docs/derivation-v2.md).
 
 ### Mux Process
 

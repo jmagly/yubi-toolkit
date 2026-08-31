@@ -51,7 +51,7 @@ if [[ $# -lt 3 ]]; then
     echo "  INPUTDATA: text file with one base64 key per line (from entropy-mix.sh)"
     echo ""
     echo "Consumes $LINES_REQUIRED lines: 2 for OTP slots + PIN + PUK + management key."
-    echo "Outputs the derived PIN on success."
+    echo "Requires --derivation-profile v2 or legacy-v1. Generated values are not printed."
     exit 1
 fi
 
@@ -61,10 +61,12 @@ INPUT_FILE="$3"
 shift 3
 RECOVERY_FILE=""
 RECOVERY_RECIPIENT=""
+DERIVATION_PROFILE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --recovery-file) RECOVERY_FILE="$2"; shift 2 ;;
         --recovery-recipient) RECOVERY_RECIPIENT="$2"; shift 2 ;;
+        --derivation-profile) DERIVATION_PROFILE="$2"; shift 2 ;;
         *) log_err "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -74,6 +76,13 @@ if [[ -n "$RECOVERY_FILE" || -n "$RECOVERY_RECIPIENT" ]]; then
         exit 1
     }
 fi
+case "$DERIVATION_PROFILE" in
+    v2|legacy-v1) ;;
+    *)
+        log_err "Choose --derivation-profile v2 or legacy-v1; implicit migration is forbidden"
+        exit 1
+        ;;
+esac
 
 validate_mode "$MODE"
 validate_serial "$SERIAL"
@@ -268,45 +277,58 @@ hex_to_alphanum() {
 # Derive all credentials
 # =============================================================================
 
-# --- PIV PIN (8 numeric digits) ---
-pin_hex=$(hkdf_derive_hex "$raw_pin" "yubikey-piv-pin" "$PIV_PIN_LEN")
-derived_pin=$(hex_to_numeric "$pin_hex" "$PIV_PIN_LEN")
-
-# --- PIV PUK (8 alphanumeric chars) ---
-puk_hex=$(hkdf_derive_hex "$raw_puk" "yubikey-piv-puk" "$PIV_PUK_LEN")
-derived_puk=$(hex_to_alphanum "$puk_hex" "$PIV_PUK_LEN")
-
-# --- PIV Management Key (AES256 32 bytes or TDES 24 bytes, hex) ---
-derived_mgmt=$(hkdf_derive_hex "$raw_mgmt" "yubikey-piv-mgmt-key" "$PIV_MGMT_KEY_LEN")
-
-# --- OTP Slot modes ---
 case "$MODE" in
     otp)    slot1_mode="otp";    slot2_mode="otp"    ;;
     static) slot1_mode="static"; slot2_mode="static" ;;
     mixed)  slot1_mode="otp";    slot2_mode="static" ;;
 esac
 
-# --- OTP Slot 1 ---
-# Use scalar variables instead of associative arrays for Bash 3.2 compatibility.
 slot1_desc=""
 slot2_desc=""
-if [[ "$slot1_mode" == "otp" ]]; then
-    s1_aes=$(hkdf_derive_hex "$raw_slot1" "yubiotp-aes-key-slot1" "$OTP_AES_KEY_LEN")
-    s1_pid=$(hkdf_derive_hex "$raw_slot1" "yubiotp-private-id-slot1" "$OTP_PRIVATE_ID_LEN")
-    slot1_desc="Yubico OTP credential"
+if [[ "$DERIVATION_PROFILE" == "v2" ]]; then
+    derived_pin=$(credential_v2_charset "$raw_pin" "$SERIAL" "piv/pin" "$PIV_PIN_LEN" "0123456789")
+    derived_puk=$(credential_v2_charset "$raw_puk" "$SERIAL" "piv/puk" "$PIV_PUK_LEN" "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+    derived_mgmt=$(credential_v2_hkdf_hex "$raw_mgmt" "$SERIAL" "piv/management-key/$MGMT_KEY_ALGO" 0 "$PIV_MGMT_KEY_LEN")
+    derived_fido_pin=$(credential_v2_charset "$raw_pin" "$SERIAL" "fido2/pin" 8 "0123456789")
+    if [[ "$slot1_mode" == "otp" ]]; then
+        s1_aes=$(credential_v2_hkdf_hex "$raw_slot1" "$SERIAL" "otp/slot1/aes-key" 0 "$OTP_AES_KEY_LEN")
+        s1_pid=$(credential_v2_hkdf_hex "$raw_slot1" "$SERIAL" "otp/slot1/private-id" 0 "$OTP_PRIVATE_ID_LEN")
+        slot1_desc="Yubico OTP credential"
+    else
+        s1_pw=$(credential_v2_charset "$raw_slot1" "$SERIAL" "otp/slot1/static-password" "$MAX_STATIC_LEN" "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        slot1_desc="static password (US layout, ${#s1_pw} chars)"
+    fi
+    if [[ "$slot2_mode" == "otp" ]]; then
+        s2_aes=$(credential_v2_hkdf_hex "$raw_slot2" "$SERIAL" "otp/slot2/aes-key" 0 "$OTP_AES_KEY_LEN")
+        s2_pid=$(credential_v2_hkdf_hex "$raw_slot2" "$SERIAL" "otp/slot2/private-id" 0 "$OTP_PRIVATE_ID_LEN")
+        slot2_desc="Yubico OTP credential"
+    else
+        s2_pw=$(credential_v2_charset "$raw_slot2" "$SERIAL" "otp/slot2/static-password" "$MAX_STATIC_LEN" "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        slot2_desc="static password (US layout, ${#s2_pw} chars)"
+    fi
 else
-    s1_pw=$(hex_to_alphanum "$(hkdf_derive_hex "$raw_slot1" "static-password-slot1" "$MAX_STATIC_LEN")" "$MAX_STATIC_LEN")
-    slot1_desc="static password (US layout, ${#s1_pw} chars)"
-fi
-
-# --- OTP Slot 2 ---
-if [[ "$slot2_mode" == "otp" ]]; then
-    s2_aes=$(hkdf_derive_hex "$raw_slot2" "yubiotp-aes-key-slot2" "$OTP_AES_KEY_LEN")
-    s2_pid=$(hkdf_derive_hex "$raw_slot2" "yubiotp-private-id-slot2" "$OTP_PRIVATE_ID_LEN")
-    slot2_desc="Yubico OTP credential"
-else
-    s2_pw=$(hex_to_alphanum "$(hkdf_derive_hex "$raw_slot2" "static-password-slot2" "$MAX_STATIC_LEN")" "$MAX_STATIC_LEN")
-    slot2_desc="static password (US layout, ${#s2_pw} chars)"
+    pin_hex=$(hkdf_derive_hex "$raw_pin" "yubikey-piv-pin" "$PIV_PIN_LEN")
+    derived_pin=$(hex_to_numeric "$pin_hex" "$PIV_PIN_LEN")
+    puk_hex=$(hkdf_derive_hex "$raw_puk" "yubikey-piv-puk" "$PIV_PUK_LEN")
+    derived_puk=$(hex_to_alphanum "$puk_hex" "$PIV_PUK_LEN")
+    derived_mgmt=$(hkdf_derive_hex "$raw_mgmt" "yubikey-piv-mgmt-key" "$PIV_MGMT_KEY_LEN")
+    derived_fido_pin="$derived_pin"
+    if [[ "$slot1_mode" == "otp" ]]; then
+        s1_aes=$(hkdf_derive_hex "$raw_slot1" "yubiotp-aes-key-slot1" "$OTP_AES_KEY_LEN")
+        s1_pid=$(hkdf_derive_hex "$raw_slot1" "yubiotp-private-id-slot1" "$OTP_PRIVATE_ID_LEN")
+        slot1_desc="Yubico OTP credential"
+    else
+        s1_pw=$(hex_to_alphanum "$(hkdf_derive_hex "$raw_slot1" "static-password-slot1" "$MAX_STATIC_LEN")" "$MAX_STATIC_LEN")
+        slot1_desc="static password (US layout, ${#s1_pw} chars)"
+    fi
+    if [[ "$slot2_mode" == "otp" ]]; then
+        s2_aes=$(hkdf_derive_hex "$raw_slot2" "yubiotp-aes-key-slot2" "$OTP_AES_KEY_LEN")
+        s2_pid=$(hkdf_derive_hex "$raw_slot2" "yubiotp-private-id-slot2" "$OTP_PRIVATE_ID_LEN")
+        slot2_desc="Yubico OTP credential"
+    else
+        s2_pw=$(hex_to_alphanum "$(hkdf_derive_hex "$raw_slot2" "static-password-slot2" "$MAX_STATIC_LEN")" "$MAX_STATIC_LEN")
+        slot2_desc="static password (US layout, ${#s2_pw} chars)"
+    fi
 fi
 
 # =============================================================================
@@ -319,6 +341,7 @@ log_info "Target:      YubiKey $SERIAL"
 log_info "OTP Slot 1:  ${slot1_desc}"
 log_info "OTP Slot 2:  ${slot2_desc}"
 log_info "PIV:         unique PIN, PUK, and ${MGMT_KEY_ALGO} management key"
+log_info "Derivation:  $DERIVATION_PROFILE"
 log_info "Recovery:    ${RECOVERY_FILE:-disabled}"
 echo ""
 printf "${YLW}This operation replaces the configured PIV and OTP credentials.${RST}\n"
@@ -342,9 +365,9 @@ if [[ "$slot2_mode" == "otp" ]]; then
 else
     slot2_json=$(printf '{"kind":"static","password":"%s"}' "$s2_pw")
 fi
-printf '{"serial":%s,"management_algorithm":"%s","management_key":"%s","pin":"%s","puk":"%s","slot1":%s,"slot2":%s,"fido_pin":"%s"}\n' \
+printf '{"serial":%s,"management_algorithm":"%s","management_key":"%s","pin":"%s","puk":"%s","slot1":%s,"slot2":%s,"fido_pin":"%s","derivation_profile":"%s"}\n' \
     "$SERIAL" "$MGMT_KEY_ALGO" "$derived_mgmt" "$derived_pin" "$derived_puk" \
-    "$slot1_json" "$slot2_json" "$derived_pin" > "$descriptor"
+    "$slot1_json" "$slot2_json" "$derived_fido_pin" "$DERIVATION_PROFILE" > "$descriptor"
 
 if [[ -n "$RECOVERY_FILE" ]]; then
     command -v age >/dev/null 2>&1 || { log_err "age is required for recovery output"; exit 1; }
