@@ -145,7 +145,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 | `yubi.sh info [serial]` | Detailed info for a specific key |
 | `yubi.sh status` | Show seed pool status |
 | `yubi.sh doctor [serial]` | Machine-readable dependency and device support report (`--json`) |
-| `yubi.sh reset <piv|fido2> [serial]` | Reset exactly one named application after an independent typed confirmation |
+| `yubi.sh reset <piv\|fido2> [serial]` | Reset exactly one named application after an independent typed confirmation |
 | `yubi.sh purge` | Remove empty/exhausted encrypted pool files |
 
 ### Air-Gapped Flags
@@ -176,6 +176,7 @@ may archive those files as provenance, but they are not credential material.
 Each encrypted pool receives a separate mode-600 `.provenance.json` record
 identifying the platform CSPRNG as the secret root, human/sensor/image inputs as
 unassessed supplements, and public diversification as disabled.
+
 ## Architecture
 
 ### Two Paths
@@ -280,14 +281,14 @@ of claiming that overwrite or TRIM can reliably erase it.
 
 All password entry uses silent terminal input (`read -rs`). After entry, a masked preview is displayed showing only the first 5 and last 5 characters:
 
-```
+```text
   [D1 #1] vvccb...jneld
   [D1 #2] krtgh...pqwmx
 ```
 
 ## File Structure
 
-```
+```text
 ~/.yubikey-seeds/                       # Managed seed directory (mode 700)
   recipient                             # Public age recipient only
   bootstrap-20260308-143022.age         # Authenticated encrypted pool
@@ -298,7 +299,7 @@ All password entry uses silent terminal input (`read -rs`). After entry, a maske
 Legacy entropy collection files may be retained wherever you previously stored
 them, but they are provenance-only and are not accepted as credential input:
 
-```
+```text
 ~/entropy-data/pool.bin                 # Portable entropy file (YUBI-ENTROPY-V1)
 ```
 
@@ -364,26 +365,33 @@ macOS Bash 3.2 gate and hardware-test boundary.
 ## Troubleshooting
 
 ### "LibreSSL detected" (macOS)
+
 Your `openssl` is resolving to Apple's `/usr/bin/openssl` (LibreSSL), which lacks the `kdf` subcommand. Install Homebrew OpenSSL: `brew install openssl@3`. The toolkit auto-prepends the brew path when scripts are sourced, so this typically resolves itself once `openssl@3` is installed. If you have a custom `PATH` that overrides this, ensure `/opt/homebrew/opt/openssl@3/bin` (Apple Silicon) or `/usr/local/opt/openssl@3/bin` (Intel) appears before `/usr/bin`.
 
 ### "OpenSSL 3.0+ required" (Linux)
+
 Your system has OpenSSL 1.x. Upgrade to a newer OS (Ubuntu 22.04+) or install OpenSSL 3.x manually. The `openssl kdf` subcommand is required for HKDF and does not exist in 1.x.
 
 ### "No YubiKeys detected"
+
 Ensure `ykman` is installed and your YubiKey is inserted. Try `ykman list` to verify. If using USB-C, try a different port.
 
 On macOS, you may need to grant USB device access to your terminal app the first time you use ykman. If `ykman list` hangs, unplug and replug the key.
 
 ### Mouse entropy falls back to keyboard
+
 This happens when no X11 display is available -- always the case on macOS (which uses Quartz, not X11), and on headless Linux, Wayland-only sessions, or SSH sessions. The toolkit collects another keyboard sample, but makes no entropy estimate for either input; the CSPRNG remains the security root.
 
 ### External API inputs are rejected
+
 Live NIST, drand, and random.org paths were removed because the previous code did not authenticate them. Legacy external files are not mixed. This cannot weaken generated values because public inputs were never a required secret source.
 
 ### Entropy file validation fails
+
 Run `yubi.sh entropy-verify <file>` for diagnostics. Common causes: file was truncated during transfer, or modified after collection (SHA-256 mismatch).
 
 ### "command not found: now_ns" or similar (macOS)
+
 You ran one of the helper scripts (e.g. `bootstrap-entropy.sh`) directly without sourcing through `yubi.sh`, AND your `bash` is exiting before `yubi-lib.sh` is fully loaded. Always invoke commands via `./yubi.sh <subcommand>` -- the unified entry point sources the library correctly.
 
 ## License
