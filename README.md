@@ -19,12 +19,11 @@ claimed or estimated min-entropy:
 | Thermal and I/O timing | Unassessed supplement | No min-entropy claim |
 | YubiKey passwords | Unassessed supplement | Operator-controlled input |
 | Image and extra files | Unassessed supplement | Content hashes/input data |
-| Public beacons/APIs | Disabled | Unverified NIST, drand, and random.org paths were removed |
+| Public beacons/APIs | Unsupported | Public data is not accepted as credential entropy |
 
-Public beacon values are public diversification, not secret entropy. They are
-not used because the former implementation did not verify signatures and chain
-parameters. Pool-adjacent provenance records this policy separately from seed
-material.
+Public beacon values are public data, not secret entropy, and are not accepted
+as credential input. Pool-adjacent provenance records this policy separately
+from seed material.
 
 ## Quick Start
 
@@ -117,7 +116,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 | Command | Description |
 |---------|-------------|
 | `yubi.sh bootstrap [count]` | Generate seeds from scratch (default: 15) |
-| `yubi.sh bootstrap [count] <file>` | Legacy positional form; external beacon files are rejected |
+| `yubi.sh bootstrap [count] <file>` | Unsupported external-input form; exits without generating seeds |
 | `yubi.sh bootstrap [count] --mux` | Generate seeds with 2-device password muxing |
 | `yubi.sh bootstrap [count] --image-dir <path>` | Generate seeds with image file hashes as entropy |
 | `yubi.sh mux` | Pair passwords from 2 existing YubiKeys |
@@ -127,7 +126,7 @@ If you see `LibreSSL detected` when running any command, your `PATH` is overridi
 
 | Command | Description |
 |---------|-------------|
-| `yubi.sh entropy-collect` | Removed; exits because unverified public inputs are forbidden |
+| `yubi.sh entropy-collect` | Unsupported compatibility command; exits without collecting data |
 | `yubi.sh entropy-verify <file>` | Validate integrity and report contents of entropy file |
 
 ### Key Programming
@@ -155,7 +154,7 @@ The `bootstrap`, `enrich`, and `init` commands support these flags for air-gappe
 | Flag | Description |
 |------|-------------|
 | `--no-external` | Compatibility no-op; live external sources are disabled |
-| `--entropy-file <path>` | Rejected: legacy unverified beacon files are provenance-only |
+| `--entropy-file <path>` | Unsupported; public beacon files are not credential input |
 | `--image-dir <path>` | Hash image files as additional entropy (bootstrap only) |
 
 ### OTP Modes
@@ -168,10 +167,9 @@ The `bootstrap`, `enrich`, and `init` commands support these flags for air-gappe
 
 ## Offline operation
 
-Seed generation and provisioning make no network requests. The deprecated
-`entropy-collect` command fails closed, and legacy `--entropy-file` inputs are
-not mixed because their public-beacon signatures were never verified. Operators
-may archive those files as provenance, but they are not credential material.
+Seed generation and provisioning make no network requests. External entropy
+collection and file inputs are unsupported and fail closed. Public data is not
+credential material.
 
 Each encrypted pool receives a separate mode-600 `.provenance.json` record
 identifying the platform CSPRNG as the secret root, human/sensor/image inputs as
@@ -211,8 +209,9 @@ Security depends on the mandatory CSPRNG, not on an unmeasured assumption about 
 
 Credential expansion uses the versioned `YUBI-CRED-V2` suite, independent
 application/purpose labels, and unbiased rejection sampling. Persistent-pool
-configuration has no implicit profile: select `v2`, or select `legacy-v1` only
-for an intentional migration. See [the derivation specification](docs/derivation-v2.md).
+configuration has no implicit profile: select `v2` for current provisioning.
+The `legacy-v1` compatibility profile is available only when reproducing an
+existing credential set. See [the derivation specification](docs/derivation-v2.md).
 
 Provisioning scope is PIV plus both OTP slots, with FIDO2 PIN included only
 when `--with-fido-pin` is supplied. It does not initialize OATH, OpenPGP,
@@ -296,8 +295,8 @@ All password entry uses silent terminal input (`read -rs`). After entry, a maske
   mux-20260308-150000.age               # Authenticated encrypted pool
 ```
 
-Legacy entropy collection files may be retained wherever you previously stored
-them, but they are provenance-only and are not accepted as credential input:
+External entropy files are not accepted as credential input. If retained for
+independent provenance purposes, they remain outside the managed seed directory:
 
 ```text
 ~/entropy-data/pool.bin                 # Portable entropy file (YUBI-ENTROPY-V1)
@@ -313,7 +312,7 @@ All seed file management is automatic -- you never need to specify paths.
 | `yubi-lib.sh` | Shared library (logging, age pools, tmpfs, entropy file I/O) |
 | `bootstrap-entropy.sh` | Interactive seed generation for new users |
 | `entropy-mix.sh` | Batch HKDF-SHA512 enrichment of password lists |
-| `entropy-collect.sh` | Fail-closed compatibility stub for the removed beacon collector |
+| `entropy-collect.sh` | Fail-closed compatibility stub for unsupported external collection |
 | `entropy-verify.sh` | Entropy file integrity validation and reporting |
 | `yubi-mux.sh` | 2-device password collection and random pairing |
 | `configure-yubi.sh` | YubiKey programmer (PIV + OTP slots) |
@@ -382,9 +381,11 @@ On macOS, you may need to grant USB device access to your terminal app the first
 
 This happens when no X11 display is available -- always the case on macOS (which uses Quartz, not X11), and on headless Linux, Wayland-only sessions, or SSH sessions. The toolkit collects another keyboard sample, but makes no entropy estimate for either input; the CSPRNG remains the security root.
 
-### External API inputs are rejected
+### External inputs are rejected
 
-Live NIST, drand, and random.org paths were removed because the previous code did not authenticate them. Legacy external files are not mixed. This cannot weaken generated values because public inputs were never a required secret source.
+Public APIs and external beacon files are unsupported credential inputs. Seed
+generation uses the platform CSPRNG as its mandatory secret root and makes no
+network requests.
 
 ### Entropy file validation fails
 

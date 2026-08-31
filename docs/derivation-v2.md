@@ -33,13 +33,12 @@ discarded. When a 64-byte block is exhausted, derive the next counter block.
 Numeric values use `0123456789`; alphanumeric values use lowercase, uppercase,
 then digits in that exact order.
 
-## Migration
+## Derivation profiles
 
 Persistent-pool provisioning requires an explicit `--derivation-profile v2`
-or `--derivation-profile legacy-v1`. There is no implicit default and therefore
-no silent credential drift. `legacy-v1` preserves the pre-v2 derivation path
-only for an intentional recovery/migration operation. Fresh `init` operations
-select v2 explicitly. Recovery ciphertext records the selected profile.
+or `--derivation-profile legacy-v1`. There is no implicit default.
+`legacy-v1` exists only to reproduce an already-established credential set.
+New provisioning selects v2. Recovery ciphertext records the selected profile.
 
 Known-answer and rejection-boundary vectors are executable in
 `tests/test-credential-derivation.sh`.
